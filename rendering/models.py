@@ -4,13 +4,15 @@ Creates all geometry programmatically (no external assets needed).
 """
 
 import math
+import random as _random
 from panda3d.core import (
     GeomVertexFormat, GeomVertexData, GeomVertexWriter,
-    Geom, GeomTriangles, GeomLines, GeomNode,
+    Geom, GeomTriangles, GeomLines, GeomPoints, GeomNode,
     LVector3, LVector4, LPoint3, LColor,
     NodePath, Material, TextureStage, Texture,
     CardMaker, LineSegs,
     TransparencyAttrib,
+    PNMImage, PerlinNoise2,
 )
 
 
@@ -169,6 +171,324 @@ def make_sphere(name, radius, segments=12, rings=8, color=(0.5, 0.5, 0.5, 1)):
     node = GeomNode(name)
     node.addGeom(geom)
     return NodePath(node)
+
+
+def build_sky_dome(parent: NodePath) -> NodePath:
+    """
+    Build an inverted hemisphere sky dome with a smooth vertical gradient.
+
+    Bottom ring  → horizon haze  (0.75, 0.82, 0.90)
+    Top vertex   → zenith blue   (0.35, 0.55, 0.85)
+
+    Rendered in the background bin with no depth write so everything
+    draws in front of it.
+    """
+    segments = 24
+    rings = 12
+    radius = 2000.0
+
+    # Horizon (bottom of dome) and zenith (top) colours
+    hz_r, hz_g, hz_b = 0.78, 0.84, 0.92
+    zn_r, zn_g, zn_b = 0.35, 0.55, 0.85
+
+    fmt = GeomVertexFormat.getV3n3c4()
+    vdata = GeomVertexData("sky_dome", fmt, Geom.UHStatic)
+
+    vertex = GeomVertexWriter(vdata, 'vertex')
+    normal = GeomVertexWriter(vdata, 'normal')
+    col = GeomVertexWriter(vdata, 'color')
+    tris = GeomTriangles(Geom.UHStatic)
+
+    # Generate hemisphere (phi from 0=top to pi/2=horizon)
+    for j in range(rings + 1):
+        phi = (math.pi / 2) * j / rings          # 0 → π/2
+        t = j / rings                              # 0 (zenith) → 1 (horizon)
+        r = hz_r * t + zn_r * (1 - t)
+        g = hz_g * t + zn_g * (1 - t)
+        b = hz_b * t + zn_b * (1 - t)
+
+        for i in range(segments + 1):
+            theta = 2 * math.pi * i / segments
+            x = radius * math.sin(phi) * math.cos(theta)
+            y = radius * math.sin(phi) * math.sin(theta)
+            z = radius * math.cos(phi)
+
+            # Inward-facing normals (we view from inside)
+            nx = -math.sin(phi) * math.cos(theta)
+            ny = -math.sin(phi) * math.sin(theta)
+            nz = -math.cos(phi)
+
+            vertex.addData3(x, y, z)
+            normal.addData3(nx, ny, nz)
+            col.addData4(r, g, b, 1.0)
+
+    for j in range(rings):
+        for i in range(segments):
+            p0 = j * (segments + 1) + i
+            p1 = p0 + 1
+            p2 = p0 + segments + 1
+            p3 = p2 + 1
+            # Winding order reversed for inside-out sphere
+            tris.addVertices(p0, p1, p2)
+            tris.addVertices(p1, p3, p2)
+
+    geom = Geom(vdata)
+    geom.addPrimitive(tris)
+    node = GeomNode("sky_dome")
+    node.addGeom(geom)
+
+    sky_np = parent.attachNewNode(node)
+    sky_np.setLightOff()
+    sky_np.setBin("background", 0)
+    sky_np.setDepthWrite(False)
+    return sky_np
+
+
+def build_night_sky_dome(parent: NodePath) -> NodePath:
+    """
+    Build an inverted hemisphere night sky dome with stars.
+
+    Bottom ring  → dark horizon      (0.03, 0.03, 0.06)
+    Top vertex   → deep night blue   (0.01, 0.01, 0.04)
+
+    Stars are rendered as small bright points scattered across the dome.
+    """
+    segments = 24
+    rings = 12
+    radius = 2000.0
+
+    # Horizon and zenith colours (night)
+    hz_r, hz_g, hz_b = 0.04, 0.04, 0.08
+    zn_r, zn_g, zn_b = 0.01, 0.01, 0.04
+
+    fmt = GeomVertexFormat.getV3n3c4()
+    vdata = GeomVertexData("night_sky_dome", fmt, Geom.UHStatic)
+
+    vertex = GeomVertexWriter(vdata, 'vertex')
+    normal = GeomVertexWriter(vdata, 'normal')
+    col = GeomVertexWriter(vdata, 'color')
+    tris = GeomTriangles(Geom.UHStatic)
+
+    for j in range(rings + 1):
+        phi = (math.pi / 2) * j / rings
+        t = j / rings
+        r = hz_r * t + zn_r * (1 - t)
+        g = hz_g * t + zn_g * (1 - t)
+        b = hz_b * t + zn_b * (1 - t)
+
+        for i in range(segments + 1):
+            theta = 2 * math.pi * i / segments
+            x = radius * math.sin(phi) * math.cos(theta)
+            y = radius * math.sin(phi) * math.sin(theta)
+            z = radius * math.cos(phi)
+
+            nx = -math.sin(phi) * math.cos(theta)
+            ny = -math.sin(phi) * math.sin(theta)
+            nz = -math.cos(phi)
+
+            vertex.addData3(x, y, z)
+            normal.addData3(nx, ny, nz)
+            col.addData4(r, g, b, 1.0)
+
+    for j in range(rings):
+        for i in range(segments):
+            p0 = j * (segments + 1) + i
+            p1 = p0 + 1
+            p2 = p0 + segments + 1
+            p3 = p2 + 1
+            tris.addVertices(p0, p1, p2)
+            tris.addVertices(p1, p3, p2)
+
+    geom = Geom(vdata)
+    geom.addPrimitive(tris)
+    gnode = GeomNode("night_sky_dome")
+    gnode.addGeom(geom)
+
+    sky_np = parent.attachNewNode(gnode)
+    sky_np.setLightOff()
+    sky_np.setBin("background", 0)
+    sky_np.setDepthWrite(False)
+
+    # --- Stars ---
+    rng = _random.Random(42)
+    star_count = 600
+    star_radius = radius * 0.99  # slightly inside dome
+
+    star_vdata = GeomVertexData("stars", GeomVertexFormat.getV3c4(), Geom.UHStatic)
+    star_vertex = GeomVertexWriter(star_vdata, 'vertex')
+    star_col = GeomVertexWriter(star_vdata, 'color')
+    star_pts = GeomPoints(Geom.UHStatic)
+
+    for k in range(star_count):
+        # Random position on upper hemisphere
+        sphi = rng.uniform(0, math.pi / 2 * 0.92)  # avoid horizon band
+        stheta = rng.uniform(0, 2 * math.pi)
+        sx = star_radius * math.sin(sphi) * math.cos(stheta)
+        sy = star_radius * math.sin(sphi) * math.sin(stheta)
+        sz = star_radius * math.cos(sphi)
+        star_vertex.addData3(sx, sy, sz)
+
+        # Random brightness and slight color variation
+        brightness = rng.uniform(0.5, 1.0)
+        tint = rng.random()
+        if tint < 0.7:
+            # White
+            star_col.addData4(brightness, brightness, brightness, 1.0)
+        elif tint < 0.85:
+            # Warm (slightly orange/yellow)
+            star_col.addData4(brightness, brightness * 0.85, brightness * 0.6, 1.0)
+        else:
+            # Cool (slightly blue)
+            star_col.addData4(brightness * 0.7, brightness * 0.8, brightness, 1.0)
+
+        star_pts.addVertex(k)
+
+    star_geom = Geom(star_vdata)
+    star_geom.addPrimitive(star_pts)
+    star_node = GeomNode("stars")
+    star_node.addGeom(star_geom)
+
+    stars_np = sky_np.attachNewNode(star_node)
+    stars_np.setLightOff()
+    stars_np.setRenderModeThickness(2)
+    stars_np.setBin("background", 1)
+    stars_np.setDepthWrite(False)
+
+    return sky_np
+
+
+def build_cloud_layer(parent: NodePath) -> NodePath:
+    """
+    Build a layer of 8 procedural cloud quads at high altitude.
+
+    Each cloud is a semi-transparent textured quad generated with
+    Perlin noise, randomly placed in a 400 m ring at 500-800 m altitude.
+    """
+    cloud_root = parent.attachNewNode("cloud_layer")
+
+    rng = _random.Random(99)
+    noise = PerlinNoise2(4, 4, 256, rng.randint(0, 9999))
+
+    for idx in range(8):
+        # Random placement
+        angle = rng.uniform(0, 2 * math.pi)
+        dist = rng.uniform(60, 400)
+        cx = dist * math.cos(angle)
+        cy = dist * math.sin(angle)
+        alt = rng.uniform(500, 800)
+        size = rng.uniform(60, 160)
+
+        # Generate cloud texture (PNMImage RGBA)
+        res = 64
+        img = PNMImage(res, res, 4)       # 4-channel RGBA
+        img.addAlpha()                     # ensure alpha channel exists
+        for py in range(res):
+            for px in range(res):
+                # Normalised coords -1..1
+                u = (px / (res - 1)) * 2 - 1
+                v = (py / (res - 1)) * 2 - 1
+                # Falloff from centre (elliptical, softer edges)
+                d2 = u * u + v * v
+                falloff = max(0.0, 1.0 - d2)
+                # Perlin noise for puffiness
+                n = noise(px / res * 4 + idx * 7.3, py / res * 4 + idx * 3.1)
+                n = (n + 1.0) * 0.5   # map -1..1 → 0..1
+                alpha = falloff * n
+                alpha = min(1.0, alpha * 2.2)  # boost
+                alpha *= 0.55                   # overall translucency
+                img.setXelA(px, py, 1.0, 1.0, 1.0, alpha)
+
+        tex = Texture(f"cloud_tex_{idx}")
+        tex.load(img)
+        tex.setWrapU(Texture.WMClamp)
+        tex.setWrapV(Texture.WMClamp)
+
+        # Build quad
+        cm = CardMaker(f"cloud_{idx}")
+        hs = size / 2
+        cm.setFrame(-hs, hs, -hs, hs)
+        card = cloud_root.attachNewNode(cm.generate())
+        card.setTexture(tex)
+        card.setTransparency(TransparencyAttrib.MAlpha)
+        card.setLightOff()
+        card.setBin("fixed", 5)
+        card.setDepthWrite(False)
+
+        # Lay flat and position
+        card.setP(-90)
+        card.setPos(cx, cy, alt)
+        # Slight random rotation
+        card.setH(rng.uniform(0, 360))
+
+    return cloud_root
+
+
+def _generate_ground_texture() -> Texture:
+    """Generate a 512x512 procedural grass/dirt ground texture using Perlin noise."""
+    res = 512
+    img = PNMImage(res, res, 3)
+
+    # Two Perlin noise layers with different frequencies
+    noise_large = PerlinNoise2(6, 6, 256, 42)
+    noise_fine = PerlinNoise2(32, 32, 256, 137)
+
+    # Base grass-brown colour
+    base_r, base_g, base_b = 0.32, 0.42, 0.22
+
+    for py in range(res):
+        for px in range(res):
+            u = px / res
+            v = py / res
+            # Large-scale patches (lighter / darker green-brown)
+            n1 = noise_large(u * 6, v * 6)        # -1..1
+            n1 = n1 * 0.12                          # subtle shift
+            # Fine grain
+            n2 = noise_fine(u * 32, v * 32)
+            n2 = n2 * 0.06
+
+            r = max(0.0, min(1.0, base_r + n1 * 0.8 + n2 * 0.5))
+            g = max(0.0, min(1.0, base_g + n1 + n2))
+            b = max(0.0, min(1.0, base_b + n1 * 0.6 + n2 * 0.4))
+            img.setXel(px, py, r, g, b)
+
+    tex = Texture("ground_tex")
+    tex.load(img)
+    tex.setWrapU(Texture.WMRepeat)
+    tex.setWrapV(Texture.WMRepeat)
+    tex.setMinfilter(Texture.FTLinearMipmapLinear)
+    tex.setMagfilter(Texture.FTLinear)
+    return tex
+
+
+def _generate_grass_texture() -> Texture:
+    """Generate a small grass-blade texture (RGBA) for billboard quads."""
+    w, h = 32, 64
+    img = PNMImage(w, h, 4)
+    img.addAlpha()
+    img.fill(0.0, 0.0, 0.0)
+    # Fill with transparent
+    for py in range(h):
+        for px in range(w):
+            img.setAlpha(px, py, 0.0)
+
+    # Draw 3 triangular blades
+    rng = _random.Random(77)
+    for blade in range(3):
+        cx = rng.randint(6, w - 7)
+        bw = rng.randint(3, 6)       # blade half-width at base
+        green = 0.3 + rng.random() * 0.3
+        for py in range(h):
+            t = py / h  # 0=bottom, 1=top
+            half_w = bw * (1.0 - t * 0.9)  # narrows toward top
+            for px in range(max(0, int(cx - half_w)), min(w, int(cx + half_w) + 1)):
+                g_val = green + 0.15 * (1 - t)
+                img.setXelA(px, py, 0.15, g_val, 0.08, 0.85)
+
+    tex = Texture("grass_blade")
+    tex.load(img)
+    tex.setWrapU(Texture.WMClamp)
+    tex.setWrapV(Texture.WMClamp)
+    return tex
 
 
 def build_turret_model(parent: NodePath) -> dict:
@@ -346,35 +666,109 @@ def build_turret_model(parent: NodePath) -> dict:
 
 
 def build_environment(parent: NodePath):
-    """Build the shooting range environment."""
-    # Ground plane
-    ground = make_box("ground", 200, 200, 0.1, (0.35, 0.45, 0.25, 1))
+    """Build the shooting range environment with textured ground, trees, bushes, and grass."""
+
+    # ── Textured ground plane ────────────────────────────────────
+    ground_tex = _generate_ground_texture()
+
+    # Use a simple box; apply UV-tiled texture
+    ground = make_box("ground", 400, 400, 0.1, (1.0, 1.0, 1.0, 1))
     ground.reparentTo(parent)
     ground.setPos(0, 0, -0.05)
+    ground.setTexture(ground_tex)
+    ground.setTexScale(TextureStage.getDefault(), 30, 30)
 
-    # Horizon trees (simple cone + cylinder)
-    import random
-    random.seed(42)
-    for i in range(60):
-        angle = random.uniform(0, 2 * math.pi)
-        dist = random.uniform(80, 100)
-        x = dist * math.sin(angle)
-        y = dist * math.cos(angle)
-        height = random.uniform(5, 12)
+    rng = _random.Random(42)
 
-        # Trunk
-        trunk = make_cylinder(f"trunk_{i}", 0.2, height * 0.4, 6,
-                             (0.4, 0.25, 0.15, 1))
-        trunk.reparentTo(parent)
-        trunk.setPos(x, y, 0)
+    # ── Trees (fuller canopy: 2-3 stacked spheres) ───────────────
+    # Distant ring: 80–100 m
+    for i in range(50):
+        angle = rng.uniform(0, 2 * math.pi)
+        dist = rng.uniform(80, 100)
+        _build_tree(parent, dist * math.sin(angle), dist * math.cos(angle),
+                    rng.uniform(8, 14), rng, f"tree_far_{i}")
 
-        # Canopy (cone approximated by thin cylinder)
-        canopy = make_cylinder(f"canopy_{i}", height * 0.25, height * 0.6, 6,
-                              (0.15, 0.4 + random.uniform(-0.1, 0.1), 0.12, 1))
-        canopy.reparentTo(parent)
-        canopy.setPos(x, y, height * 0.4)
+    # Mid-range ring: 40–70 m
+    for i in range(25):
+        angle = rng.uniform(0, 2 * math.pi)
+        dist = rng.uniform(40, 70)
+        _build_tree(parent, dist * math.sin(angle), dist * math.cos(angle),
+                    rng.uniform(6, 11), rng, f"tree_mid_{i}")
+
+    # ── Bushes (small green spheres, 20-55 m) ───────────────────
+    for i in range(30):
+        angle = rng.uniform(0, 2 * math.pi)
+        dist = rng.uniform(20, 55)
+        bx = dist * math.sin(angle)
+        by = dist * math.cos(angle)
+        bh = rng.uniform(0.8, 1.8)
+        bw = rng.uniform(1.0, 2.2)
+        green = 0.30 + rng.uniform(-0.08, 0.08)
+        bush = make_sphere(f"bush_{i}", bw / 2, 8, 5,
+                           (0.12, green, 0.10, 1))
+        bush.reparentTo(parent)
+        bush.setPos(bx, by, bh * 0.4)
+        bush.setSz(bh / bw)
+
+    # ── Grass patches (crossed billboard quads near turret) ──────
+    grass_tex = _generate_grass_texture()
+    grass_root = parent.attachNewNode("grass")
+
+    for i in range(250):
+        angle = rng.uniform(0, 2 * math.pi)
+        dist = rng.uniform(1.5, 35)
+        gx = dist * math.sin(angle)
+        gy = dist * math.cos(angle)
+        gh = rng.uniform(0.3, 0.65)
+        gw = gh * rng.uniform(0.3, 0.5)
+
+        # Two crossed quads (X-shape)
+        for rot in (0, 90):
+            cm = CardMaker(f"grass_{i}_{rot}")
+            cm.setFrame(-gw / 2, gw / 2, 0, gh)
+            card = grass_root.attachNewNode(cm.generate())
+            card.setTexture(grass_tex)
+            card.setTransparency(TransparencyAttrib.MDual)
+            card.setPos(gx, gy, 0)
+            card.setH(rng.uniform(0, 360) + rot)
+            # Slight green tint variation
+            tint = 0.8 + rng.uniform(-0.15, 0.15)
+            card.setColor(tint, 1.0, tint, 1.0)
+
+    grass_root.setLightOff()
+    grass_root.setDepthWrite(True)
+    grass_root.setBin("transparent", 0)
 
     return ground
+
+
+def _build_tree(parent, x, y, height, rng, name):
+    """Build a single tree with trunk + 2-3 stacked canopy spheres."""
+    trunk_h = height * 0.35
+    trunk_r = 0.15 + height * 0.015
+    bark = (0.35 + rng.uniform(-0.05, 0.05),
+            0.22 + rng.uniform(-0.04, 0.04),
+            0.12, 1)
+
+    trunk = make_cylinder(f"{name}_trunk", trunk_r, trunk_h, 6, bark)
+    trunk.reparentTo(parent)
+    trunk.setPos(x, y, 0)
+
+    # 2-3 canopy spheres stacked with overlap
+    n_layers = rng.choice([2, 2, 3])
+    canopy_r = height * 0.22
+    green_base = 0.35 + rng.uniform(-0.08, 0.08)
+    for layer in range(n_layers):
+        z = trunk_h + canopy_r * 0.7 * layer
+        layer_r = canopy_r * (1.0 - layer * 0.15)
+        g = green_base + layer * 0.05
+        canopy = make_sphere(f"{name}_canopy_{layer}",
+                             layer_r, 8, 5,
+                             (0.10, g, 0.08, 1))
+        canopy.reparentTo(parent)
+        canopy.setPos(x + rng.uniform(-0.3, 0.3),
+                      y + rng.uniform(-0.3, 0.3),
+                      z)
 
 
 def build_target_model(parent: NodePath, target_type: str, radius: float) -> NodePath:
@@ -403,140 +797,52 @@ def build_target_model(parent: NodePath, target_type: str, radius: float) -> Nod
 
 def build_training_target(parent: NodePath, **kwargs) -> NodePath:
     """
-    Build a static training target: small single-engine light aircraft
-    (Cessna-style). Faces south (-Y) toward the turret.
-    Wingspan ~11 m, fuselage ~8 m — realistic Cessna 172 proportions.
+    Load the Shahed-136 (Geranium-2) drone model as the training target.
+    Falls back to a simple procedural placeholder if the model file is missing.
+
+    The EGG model is in centimetres (wingspan ~250 cm, length ~350 cm).
+    We scale by 0.01 to convert to metres, then orient so the drone
+    faces south (-Y) toward the turret (nose along -Y in ENU).
     """
-    plane = parent.attachNewNode("training_target")
+    import os
+    asset_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)),
+                             "assets", "shahed")
+    egg_path = os.path.join(asset_dir, "Geranium2.egg")
 
-    # --- Colors ---
-    white = (0.92, 0.92, 0.90, 1)
-    blue_stripe = (0.15, 0.25, 0.55, 1)
-    dark = (0.20, 0.20, 0.22, 1)
-    glass = (0.45, 0.60, 0.75, 0.85)
-    red = (0.75, 0.10, 0.10, 1)
-    rubber = (0.15, 0.15, 0.15, 1)
+    wrapper = parent.attachNewNode("training_target")
 
-    # --- Fuselage (tapered: nose cylinder + main body + tail cone) ---
-    # Main fuselage body
-    fuse_main = make_cylinder("fuse_main", 0.55, 4.0, 10, white)
-    fuse_main.reparentTo(plane)
-    fuse_main.setPos(0, -1.0, 0)
-    fuse_main.setP(-90)
+    if os.path.isfile(egg_path):
+        from panda3d.core import Filename
+        import builtins
 
-    # Nose cone (tapers forward)
-    nose = make_cylinder("nose", 0.45, 1.2, 10, white)
-    nose.reparentTo(plane)
-    nose.setPos(0, -2.2, 0)
-    nose.setP(-90)
+        _loader = builtins.loader  # Panda3D global set by ShowBase
 
-    # Engine cowling (slightly wider at front)
-    cowl = make_cylinder("cowl", 0.50, 0.6, 10, dark)
-    cowl.reparentTo(plane)
-    cowl.setPos(0, -3.2, 0)
-    cowl.setP(-90)
+        model = _loader.loadModel(Filename.fromOsSpecific(egg_path))
+        model.reparentTo(wrapper)
 
-    # Spinner / propeller hub
-    spinner = make_sphere("spinner", 0.15, 8, 6, dark)
-    spinner.reparentTo(plane)
-    spinner.setPos(0, -3.9, 0)
+        # cm → m
+        model.setScale(0.01)
 
-    # Propeller blades (2-blade, thin boxes)
-    prop_color = (0.25, 0.22, 0.18, 1)
-    blade1 = make_box("prop_blade1", 0.12, 0.04, 1.2, prop_color)
-    blade1.reparentTo(plane)
-    blade1.setPos(0, -3.95, 0)
+        # The model's Z axis is the fuselage length.
+        # Rotate so model's +Z becomes -Y in Panda (nose pointing south).
+        # Model: wingspan on X, short on Y (thickness), length on Z.
+        # We want length along Y-axis (north/south) with nose toward -Y.
+        model.setP(90)    # Tilt +Z forward → now length is along +Y
+        model.setH(180)   # Flip 180° so nose faces -Y (south toward turret)
 
-    blade2 = make_box("prop_blade2", 1.2, 0.04, 0.12, prop_color)
-    blade2.reparentTo(plane)
-    blade2.setPos(0, -3.95, 0)
+        # Apply base-colour texture
+        tex_path = os.path.join(asset_dir, "textures", "Geranium2_BaseColor.png")
+        if os.path.isfile(tex_path):
+            tex = _loader.loadTexture(Filename.fromOsSpecific(tex_path))
+            model.setTexture(tex, 1)
+    else:
+        # Fallback: simple grey delta-wing shape
+        body = make_cylinder("body", 0.15, 2.5, 8, (0.45, 0.45, 0.42, 1))
+        body.reparentTo(wrapper)
+        body.setP(-90)
 
-    # Tail cone (narrows toward tail)
-    tail_cone = make_cylinder("tail_cone", 0.35, 3.0, 8, white)
-    tail_cone.reparentTo(plane)
-    tail_cone.setPos(0, 3.0, 0.1)
-    tail_cone.setP(-90)
+        wing = make_box("wing", 2.5, 0.6, 0.04, (0.45, 0.45, 0.42, 1))
+        wing.reparentTo(wrapper)
+        wing.setPos(0, 0.3, 0)
 
-    # Blue stripe along fuselage
-    stripe = make_box("stripe", 0.56, 6.0, 0.12, blue_stripe)
-    stripe.reparentTo(plane)
-    stripe.setPos(0, -0.5, 0.15)
-
-    # --- Cockpit / windshield ---
-    windshield = make_box("windshield", 0.48, 0.8, 0.35, glass)
-    windshield.reparentTo(plane)
-    windshield.setPos(0, -1.3, 0.45)
-    windshield.setTransparency(TransparencyAttrib.MAlpha)
-
-    # --- Main wings (high-wing, Cessna style) ---
-    wing_color = white
-    # Left wing
-    l_wing = make_box("wing_left", 5.5, 1.2, 0.08, wing_color)
-    l_wing.reparentTo(plane)
-    l_wing.setPos(-3.0, -0.2, 0.55)
-
-    # Right wing
-    r_wing = make_box("wing_right", 5.5, 1.2, 0.08, wing_color)
-    r_wing.reparentTo(plane)
-    r_wing.setPos(3.0, -0.2, 0.55)
-
-    # Wing struts (connect wing to lower fuselage)
-    strut_l = make_box("strut_l", 0.03, 0.8, 0.03, dark)
-    strut_l.reparentTo(plane)
-    strut_l.setPos(-1.5, -0.2, 0.28)
-    strut_l.setR(25)
-    strut_l.setSz(4.5)
-
-    strut_r = make_box("strut_r", 0.03, 0.8, 0.03, dark)
-    strut_r.reparentTo(plane)
-    strut_r.setPos(1.5, -0.2, 0.28)
-    strut_r.setR(-25)
-    strut_r.setSz(4.5)
-
-    # --- Horizontal stabilizer (tail) ---
-    h_stab = make_box("h_stab", 3.6, 0.8, 0.06, wing_color)
-    h_stab.reparentTo(plane)
-    h_stab.setPos(0, 5.5, 0.3)
-
-    # --- Vertical stabilizer (tail fin) ---
-    v_stab = make_box("v_stab", 0.06, 1.0, 1.4, wing_color)
-    v_stab.reparentTo(plane)
-    v_stab.setPos(0, 5.2, 1.0)
-
-    # Rudder stripe
-    rudder_stripe = make_box("rudder_stripe", 0.07, 0.3, 0.5, red)
-    rudder_stripe.reparentTo(plane)
-    rudder_stripe.setPos(0, 5.7, 1.3)
-
-    # --- Landing gear ---
-    # Nose gear
-    nose_strut = make_cylinder("nose_strut", 0.03, 0.5, 6, dark)
-    nose_strut.reparentTo(plane)
-    nose_strut.setPos(0, -2.5, -0.55)
-
-    nose_wheel = make_cylinder("nose_wheel", 0.12, 0.06, 8, rubber)
-    nose_wheel.reparentTo(plane)
-    nose_wheel.setPos(0, -2.5, -1.05)
-    nose_wheel.setR(90)
-
-    # Main gear left
-    main_strut_l = make_cylinder("main_strut_l", 0.03, 0.5, 6, dark)
-    main_strut_l.reparentTo(plane)
-    main_strut_l.setPos(-0.8, 0.0, -0.55)
-
-    main_wheel_l = make_cylinder("main_wheel_l", 0.15, 0.08, 8, rubber)
-    main_wheel_l.reparentTo(plane)
-    main_wheel_l.setPos(-0.8, 0.0, -1.05)
-    main_wheel_l.setR(90)
-
-    # Main gear right
-    main_strut_r = make_cylinder("main_strut_r", 0.03, 0.5, 6, dark)
-    main_strut_r.reparentTo(plane)
-    main_strut_r.setPos(0.8, 0.0, -0.55)
-
-    main_wheel_r = make_cylinder("main_wheel_r", 0.15, 0.08, 8, rubber)
-    main_wheel_r.reparentTo(plane)
-    main_wheel_r.setPos(0.8, 0.0, -1.05)
-    main_wheel_r.setR(90)
-
-    return plane
+    return wrapper

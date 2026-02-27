@@ -1,8 +1,8 @@
 """
 Target Manager — Aerial Target Spawning and Tracking
 
-Generates aerial targets with realistic flight parameters:
-  - Various types: drone, light aircraft, helicopter, cruise missile
+Generates Shahed-136 (Geran-2) targets with realistic flight parameters:
+  - Based on real Shahed-136 specifications
   - Straight-line trajectories at constant speed
   - Spawn at configurable ranges and altitudes
   - One target at a time (round-based)
@@ -15,10 +15,7 @@ from enum import Enum
 
 
 class TargetType(Enum):
-    DRONE = "drone"
-    LIGHT_AIRCRAFT = "light_aircraft"
-    HELICOPTER = "helicopter"
-    CRUISE_MISSILE = "cruise_missile"
+    SHAHED_136 = "shahed_136"
 
 
 @dataclass
@@ -36,47 +33,18 @@ class TargetProfile:
     color: Tuple[float, float, float] = (0.8, 0.2, 0.2)
 
 
-# Target profiles with realistic specs
+# Shahed-136 / Geran-2 — real specifications from OSINT
+# See assets/shahed/SPECIFICATIONS.md for full details
 TARGET_PROFILES = {
-    TargetType.DRONE: TargetProfile(
-        name="UAV Drone",
-        target_type=TargetType.DRONE,
-        speed_range=(20, 60),        # ~70-220 km/h
-        altitude_range=(100, 500),
-        size_m=2.0,
-        hit_radius=1.5,
-        model_scale=0.5,
-        color=(0.3, 0.3, 0.3),
-    ),
-    TargetType.LIGHT_AIRCRAFT: TargetProfile(
-        name="Light Aircraft",
-        target_type=TargetType.LIGHT_AIRCRAFT,
-        speed_range=(50, 120),       # ~180-430 km/h
-        altitude_range=(200, 500),
-        size_m=8.0,
-        hit_radius=4.0,
-        model_scale=1.5,
-        color=(0.9, 0.9, 0.9),
-    ),
-    TargetType.HELICOPTER: TargetProfile(
-        name="Helicopter",
-        target_type=TargetType.HELICOPTER,
-        speed_range=(30, 80),        # ~110-290 km/h
-        altitude_range=(50, 400),
-        size_m=10.0,
-        hit_radius=5.0,
-        model_scale=1.2,
-        color=(0.2, 0.4, 0.2),
-    ),
-    TargetType.CRUISE_MISSILE: TargetProfile(
-        name="Cruise Missile",
-        target_type=TargetType.CRUISE_MISSILE,
-        speed_range=(200, 300),      # ~720-1080 km/h
-        altitude_range=(30, 200),
-        size_m=5.0,
-        hit_radius=1.0,
-        model_scale=0.8,
-        color=(0.5, 0.5, 0.5),
+    TargetType.SHAHED_136: TargetProfile(
+        name="Shahed-136",
+        target_type=TargetType.SHAHED_136,
+        speed_range=(19, 51),        # 70-185 km/h (min observed to max)
+        altitude_range=(60, 2000),   # Low approach to cruise altitude
+        size_m=2.5,                  # Wingspan 2.5m
+        hit_radius=1.75,             # Length 3.5m / 2
+        model_scale=1.0,
+        color=(0.35, 0.35, 0.30),   # Olive-grey composite
     ),
 }
 
@@ -138,9 +106,9 @@ class TargetManager:
         if self.active_target and self.active_target.alive:
             self.active_target.alive = False
         
-        # Choose type
+        # Default to Shahed-136
         if target_type is None:
-            target_type = np.random.choice(list(TargetType))
+            target_type = TargetType.SHAHED_136
         
         profile = TARGET_PROFILES[target_type]
         

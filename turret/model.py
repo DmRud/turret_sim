@@ -91,7 +91,7 @@ class TurretModel:
         
         # Timing
         self.fire_interval = 60.0 / self.config.rate_of_fire_rpm
-        self.time_since_last_shot = 999.0
+        self.time_since_last_shot = self.fire_interval  # Ready to fire immediately
         self.state_timer = 0.0  # Timer for reload/cooldown states
         
         # Twin barrel alternation
@@ -256,10 +256,16 @@ class TurretModel:
         
         # Firing logic
         self.time_since_last_shot += dt
-        
+
         if self.is_firing and self.ammo_remaining > 0:
             self.state = TurretState.FIRING
-            
+
+            # Cap accumulated time so we never fire more than 2 rounds
+            # per frame (prevents burst-dump when trigger is first pulled
+            # and time_since_last_shot has accumulated a large value).
+            if self.time_since_last_shot > self.fire_interval * 2:
+                self.time_since_last_shot = self.fire_interval * 2
+
             # Check fire rate
             while self.time_since_last_shot >= self.fire_interval:
                 self._fire_round()

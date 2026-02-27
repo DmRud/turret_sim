@@ -67,15 +67,15 @@ class GameStats:
         return self.targets_hit / self.total_ammo_used * 100
 
 
-# Round progression: target type sequence
+# Round progression: Shahed-136 attack scenarios
 ROUND_SEQUENCE = [
-    (TargetType.LIGHT_AIRCRAFT, "Light aircraft"),
-    (TargetType.LIGHT_AIRCRAFT, "Light aircraft at distance"),
-    (TargetType.LIGHT_AIRCRAFT, "Light aircraft — high altitude"),
-    (TargetType.LIGHT_AIRCRAFT, "Light aircraft — fast approach"),
-    (TargetType.LIGHT_AIRCRAFT, "Light aircraft — crossing"),
-    (TargetType.LIGHT_AIRCRAFT, "Light aircraft — long range"),
-    (TargetType.LIGHT_AIRCRAFT, "Light aircraft — final"),
+    (TargetType.SHAHED_136, "Shahed-136 — approach"),
+    (TargetType.SHAHED_136, "Shahed-136 — at distance"),
+    (TargetType.SHAHED_136, "Shahed-136 — high altitude"),
+    (TargetType.SHAHED_136, "Shahed-136 — fast approach"),
+    (TargetType.SHAHED_136, "Shahed-136 — crossing"),
+    (TargetType.SHAHED_136, "Shahed-136 — long range"),
+    (TargetType.SHAHED_136, "Shahed-136 — final"),
 ]
 
 
@@ -248,7 +248,7 @@ class GameManager:
         # Static target: due north (+Y), at altitude
         target_height = 200.0  # 200m altitude
         self.current_target = self.target_manager.spawn_target(
-            target_type=TargetType.LIGHT_AIRCRAFT,
+            target_type=TargetType.SHAHED_136,
             forced_params={
                 'position': [0, self.training_distance, target_height],
                 'velocity': [0, 0, 0],  # Static — zero velocity

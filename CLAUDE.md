@@ -10,20 +10,27 @@ Realistic ballistics turret simulator: Browning M2HB (.50 BMG) dual-mounted on M
 - `ballistics/atmosphere.py` — ICAO atmosphere model (temperature, pressure, humidity → air density, speed of sound)
 - `ballistics/engine.py` — Full ballistic simulation: RK4 integrator, gravity, G7 drag, Magnus effect, Coriolis effect, wind
 - `turret/model.py` — M2HB mechanical model: traverse/elevation rates, heat, ammo, reload, twin barrel alternation
-- `targets/manager.py` — Aerial target spawning (drone, aircraft, helicopter, cruise missile), straight-line trajectories
-- `game/round_manager.py` — Round-based gameplay: weather generation, scoring, statistics
+- `targets/manager.py` — Shahed-136 target spawning, straight-line trajectories
+- `game/manager.py` — Round-based gameplay: weather generation, scoring, statistics, training mode
 - `api/rest_server.py` — Flask REST API for external script control (runs in thread)
 - `api/ws_server.py` — WebSocket event broadcaster for push notifications
 
+### IMPLEMENTED
+1. **Panda3D 3D Renderer** — Main app, scene, procedural turret model, orbit + first-person camera
+2. **Monocular PIP** — Independent scope camera parented to turret pitch node, 5° FOV, thermal imaging mode (V)
+3. **Manual Controls** — Arrow/WASD (simultaneous X+Y via polling), Space fire, R reload, T training, C camera toggle
+4. **Procedural Geometry** — Turret (barrels, cradle, tripod, scope), environment (ground, trees, sky dome, clouds, fog)
+5. **Shahed-136 3D Model** — Geranium-2 drone loaded from `assets/shahed/Geranium2.egg` with BaseColor texture
+6. **DevTools Panel** — Permanent right sidebar (] toggle): turret telemetry, target info, weather, debug toggles, performance
+7. **HUD** — Game state, ammo, heat bar, orientation, target info (range/altitude/bearing/speed), weather, stats, camera mode
+8. **Visual Effects** — Muzzle flash (billboard sprites), bullet tracers (line segments), explosion on hit (animated sphere)
+9. **Training Mode** — Static Shahed-136 at 200m altitude/200m range, respawns 3s after hit
+10. **First-Person Camera** — Operator POV behind turret, mouse aiming, cursor lock
+
 ### NOT YET IMPLEMENTED
-1. **Panda3D 3D Renderer** — Main app, scene, turret model, target models, camera (orbit)
-2. **Visual Effects** — Muzzle flash, tracers, explosion on hit, barrel smoke on overheat
-3. **Sound System** — Firing, hit, servo motors
-4. **HUD/UI** — Ammo counter, heat bar, weather panel, score, round info
-5. **Monocular PIP** — Picture-in-picture scope view with crosshair (separate camera)
-6. **Manual Controls** — Mouse/keyboard turret aiming alongside API control
-7. **Example Scripts** — Python scripts using REST API: simple aim, lead calculation
-8. **Asset Generation** — Procedural geometry for turret, targets, ground, trees
+1. **Sound System** — Firing, hit, servo motors
+2. **Barrel smoke** — Visual effect on overheat
+3. **Moving Shahed target** — Training mode with drone flying at realistic speed/altitude
 
 ## SPECIFICATIONS
 
@@ -46,13 +53,26 @@ Realistic ballistics turret simulator: Browning M2HB (.50 BMG) dual-mounted on M
 - Coriolis: Ω_ENU = ω × (0, cos(lat), sin(lat)), a = -2(Ω×v)
 - Air density: full humidity correction (moist air is lighter)
 - Speed of sound: temperature + humidity corrected
-- Integration: RK4, dt=0.001s
+- Integration: RK4, adaptive dt (0.001s transonic, 0.002s super/subsonic, 0.005s slow)
+- Optimized: pure-Python math in hot path, dense Cd LUT, altitude density LUT (29× speedup)
 
-### Targets
-- Aerial only, one at a time, straight trajectories
-- Types: drone (20-60 m/s), light aircraft (50-120), helicopter (30-80), cruise missile (200-300)
-- One-hit destruction
+### Targets — Shahed-136 Only
+- Single target type: Shahed-136 / Geran-2 kamikaze drone
+- Speed: 19–51 m/s (70–185 km/h), altitude: 60–2000m
+- One at a time, straight-line trajectories, one-hit destruction
 - Round-based with score tracking
+- Training mode: static Shahed-136 at 200m altitude, 200m range, respawns 3s after hit
+
+### Shahed-136 / Geran-2
+Full specifications in `assets/shahed/SPECIFICATIONS.md`. Key parameters:
+- **Dimensions**: 3.5m length, 2.5m wingspan, ~200 kg MTOW
+- **Speed**: cruise 140–150 km/h (39–42 m/s), max 185 km/h (51 m/s)
+- **Altitude**: cruise 700–2,000m, approach 60–200m, min 20m, ceiling 4,000m
+- **Attack profile**: RATO launch → climb to 700–2,000m → cruise at 140 km/h → descend to 200m → terminal dive
+- **Engine**: MADO MD-550 (50 hp piston, pusher), 2-blade propeller
+- **Navigation**: INS + GPS, radio correction up to 150 km
+- **RCS**: ~0.01–0.1 m² (very low, comparable to large bird)
+- **3D Model**: `assets/shahed/Geranium2.egg` (EGG format, cm scale → 0.01x), BaseColor texture applied
 
 ### API
 - REST (Flask): /status, /target, /aim, /fire/start, /fire/stop, /reload, /game, /weather, /ballistics
@@ -73,8 +93,13 @@ Realistic ballistics turret simulator: Browning M2HB (.50 BMG) dual-mounted on M
 - Sound: firing, hit/explosion, servo motors
 
 ### Controls
-- Mouse/keyboard for manual aiming + fire (ALONGSIDE API, not instead of)
-- API for scripted control
+- Arrow/WASD: turret aiming (simultaneous X+Y via KeyboardButton polling)
+- Space: fire, R: reload, Enter: start/next round, T: training mode
+- LMB/MMB drag: orbit camera, Scroll: zoom
+- C: first-person / orbit camera toggle
+- V: scope thermal imaging toggle
+- ]: debug panel (visible by default), ESC: quit
+- API for scripted control (alongside manual)
 
 ## COORDINATE SYSTEM
 ENU: X=East, Y=North, Z=Up. Turret at origin. Azimuth: 0=North, CW positive.
@@ -87,10 +112,9 @@ ENU: X=East, Y=North, Z=Up. Turret at origin. Azimuth: 0=North, CW positive.
 - numpy (math)
 
 ## CURRENT STATUS
-Core logic modules written and tested. Ballistics engine validated (4.7km at 45°, 2.9km at 5°). 
-**Next step: Panda3D application with 3D rendering, then layer in effects, HUD, controls, and example scripts.**
+Working Panda3D application with full 3D rendering, Shahed-136 drone model, scope PIP with thermal imaging, DevTools panel, HUD with target telemetry, muzzle flash, tracers, explosions, first-person camera, and optimized ballistics engine. Ballistics validated (4.7km at 45°, 2.9km at 5°).
+**Next step: Sound system, moving Shahed target with realistic flight profile, barrel smoke effect.**
 
 ## IMPORTANT NOTES
-- There are duplicate/old files from earlier iterations (physics/, server/, client/). The canonical modules are in ballistics/, turret/, targets/, game/, api/. Clean up the old files.
 - MVP level — working prototype, not production polish
 - Ballistic accuracy is the #1 priority over everything else

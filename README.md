@@ -26,11 +26,15 @@ Press **ENTER** in the 3D window to start.
 
 | Key | Action |
 |-----|--------|
-| Arrow keys / WASD | Rotate turret |
+| Arrow keys / WASD | Rotate turret (simultaneous X+Y) |
 | Space | Fire (hold) |
 | R | Reload |
 | Enter | Start game / Next round |
-| Mouse drag | Orbit camera |
+| T | Training mode (static target at 700 m) |
+| C | Toggle first-person / orbit camera |
+| V | Toggle scope thermal imaging |
+| ] | Toggle debug panel |
+| LMB / MMB drag | Orbit camera |
 | Scroll | Zoom camera |
 | ESC | Quit |
 
@@ -223,21 +227,21 @@ Full point-mass ballistic simulation for .50 BMG M33 Ball.
 turret_sim/
 ├── main.py                     # Entry point
 ├── app.py                      # Panda3D application (rendering + game loop)
-├── physics/
-│   ├── ballistics.py           # RK4 solver, all forces
-│   ├── atmosphere.py           # ICAO atmosphere + weather
-│   └── drag_tables.py          # G1/G7 Cd(Mach) tables
-├── entities/
-│   ├── turret.py               # Turret mechanics + thermal
-│   ├── target.py               # Airborne targets + spawner
-│   └── bullet.py               # Real-time bullet entity
+├── ballistics/
+│   ├── engine.py               # RK4 solver, all forces, optimized hot path
+│   ├── atmosphere.py           # ICAO atmosphere + weather + density LUT
+│   └── tables.py               # G1/G7 Cd(Mach) tables + dense O(1) lookup
+├── turret/
+│   └── model.py                # M2HB mechanics, thermal, servo model
+├── targets/
+│   └── manager.py              # Aerial target spawning + profiles
 ├── game/
-│   └── manager.py              # Rounds, scoring, game state
-├── server/
-│   ├── api.py                  # REST API (FastAPI)
-│   └── websocket_server.py     # WebSocket events
+│   └── manager.py              # Rounds, scoring, game state, training mode
+├── api/
+│   ├── rest_server.py          # REST API (Flask)
+│   └── ws_server.py            # WebSocket event broadcaster
 ├── rendering/
-│   └── models.py               # Procedural 3D geometry
+│   └── models.py               # Procedural 3D geometry (turret, targets, env)
 └── client/
     ├── turret_client.py         # Python SDK
     ├── example_simple_track.py
@@ -250,11 +254,12 @@ turret_sim/
 
 | Type | Speed | Altitude | Size | Description |
 |------|-------|----------|------|-------------|
-| Small Drone | 10–30 m/s | 50–300 m | 0.3 m | Slow, tiny, close |
-| Medium Drone | 20–60 m/s | 100–600 m | 1.0 m | Standard UAV |
-| Cruise Missile | 200–300 m/s | 30–200 m | 0.5 m | Fast, low |
-| Light Aircraft | 40–80 m/s | 200–1000 m | 3.0 m | Easy, distant |
-| Fast Aircraft | 150–250 m/s | 300–1500 m | 5.0 m | Maximum difficulty |
+| Drone | 20–60 m/s | 100–500 m | 2.0 m | Small UAV |
+| Light Aircraft | 50–120 m/s | 200–500 m | 8.0 m | Single-engine Cessna-style |
+| Helicopter | 30–80 m/s | 100–400 m | 6.0 m | Rotary-wing |
+| Cruise Missile | 200–300 m/s | 50–200 m | 4.0 m | Fast, low-altitude |
+
+> **Note:** Current game rounds use Light Aircraft only. Other types are available via API.
 
 ---
 

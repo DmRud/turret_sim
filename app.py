@@ -9,8 +9,11 @@ Controls:
   Space           : Fire
   R               : Reload
   Enter           : Start game / Next round
-  T               : Training mode (static target at 200 m)
-  F1              : Toggle debug panel
+  T               : Training mode (static target at 700 m)
+  C               : Toggle first-person / orbit camera
+  V               : Toggle scope thermal imaging
+  N               : Toggle day/night mode
+  ]               : Toggle debug panel
   Esc             : Quit
 """
 
@@ -26,7 +29,7 @@ from direct.gui.OnscreenText import OnscreenText
 from panda3d.core import (
     LVector3, LVector4, LPoint3, LColor,
     NodePath, GeomNode, LineSegs,
-    AmbientLight, DirectionalLight, PointLight,
+    AmbientLight, DirectionalLight, PointLight, Fog,
     TextNode, CardMaker,
     WindowProperties, FrameBufferProperties,
     GraphicsOutput, GraphicsPipe, Texture,
@@ -34,6 +37,7 @@ from panda3d.core import (
     TransparencyAttrib, ColorBlendAttrib,
     AntialiasAttrib, RenderModeAttrib,
     KeyboardButton, BitMask32,
+    Shader,
     loadPrcFileData,
 )
 
@@ -48,7 +52,7 @@ loadPrcFileData("", """
 
 from rendering.models import (
     build_turret_model, build_environment, build_target_model,
-    build_training_target,
+    build_training_target, build_sky_dome, build_night_sky_dome, build_cloud_layer,
     make_sphere, make_cylinder, make_box,
 )
 from game.manager import GameManager, GameState
@@ -112,9 +116,11 @@ class TurretSimApp(ShowBase):
         print("    R                 : Reload")
         print("    Enter             : Start game / Next round")
         print("    T                 : Training mode (static target)")
+        print("    C                 : Toggle first-person / orbit camera")
+        print("    V                 : Toggle scope thermal imaging")
         print("    LMB / MMB drag    : Orbit camera")
         print("    Scroll            : Zoom camera")
-        print("    F1                : Toggle debug panel")
+        print("    ]                 : Toggle debug panel")
         print("    ESC               : Quit")
         print("-"*60)
         print(f"\n  REST API:     http://localhost:8420")
@@ -128,36 +134,106 @@ class TurretSimApp(ShowBase):
 
     def _setup_scene(self):
         """Build the 3D environment."""
-        # Background color (sky)
-        self.setBackgroundColor(0.55, 0.7, 0.9, 1)
+        # --- Day / Night state ---
+        self._is_night = True  # default: night
 
-        # Environment
+        # --- Day sky ---
+        self._day_sky = build_sky_dome(self.render)
+        self._day_sky.hide()
+
+        # --- Night sky (with stars) ---
+        self._night_sky = build_night_sky_dome(self.render)
+
+        # Environment (ground, trees, bushes, grass)
         self.env_root = self.render.attachNewNode("environment")
         build_environment(self.env_root)
+
+        # Cloud layer (semi-transparent quads at altitude)
+        self.cloud_root = build_cloud_layer(self.render)
+
+        # Fog node — stored so we can adjust color per mode
+        self._scene_fog = Fog("scene_fog")
+        self.render.setFog(self._scene_fog)
 
         # Enable antialiasing
         self.render.setAntialias(AntialiasAttrib.MAuto)
 
-    def _setup_lights(self):
-        """Set up scene lighting."""
-        # Ambient
-        alight = AmbientLight('ambient')
-        alight.setColor(LVector4(0.3, 0.3, 0.35, 1))
-        self.render.setLight(self.render.attachNewNode(alight))
+        # Apply initial mode
+        self._apply_day_night()
 
-        # Sun (directional)
-        dlight = DirectionalLight('sun')
-        dlight.setColor(LVector4(1.0, 0.95, 0.85, 1))
-        dlnp = self.render.attachNewNode(dlight)
-        dlnp.setHpr(45, -45, 0)
-        self.render.setLight(dlnp)
+    def _setup_lights(self):
+        """Set up scene lighting (values adjusted by day/night toggle)."""
+        # Ambient
+        self._ambient_light = AmbientLight('ambient')
+        self._ambient_np = self.render.attachNewNode(self._ambient_light)
+        self.render.setLight(self._ambient_np)
+
+        # Sun / Moon (directional)
+        self._sun_light = DirectionalLight('sun')
+        self._sun_np = self.render.attachNewNode(self._sun_light)
+        self._sun_np.setHpr(45, -45, 0)
+        self.render.setLight(self._sun_np)
 
         # Fill light
-        dlight2 = DirectionalLight('fill')
-        dlight2.setColor(LVector4(0.3, 0.35, 0.4, 1))
-        dlnp2 = self.render.attachNewNode(dlight2)
-        dlnp2.setHpr(-135, -30, 0)
-        self.render.setLight(dlnp2)
+        self._fill_light = DirectionalLight('fill')
+        self._fill_np = self.render.attachNewNode(self._fill_light)
+        self._fill_np.setHpr(-135, -30, 0)
+        self.render.setLight(self._fill_np)
+
+        # Apply colours matching current day/night state
+        self._apply_day_night_lights()
+
+    def _apply_day_night(self):
+        """Apply full day/night visual state (sky, fog, background, clouds)."""
+        if self._is_night:
+            self.setBackgroundColor(0.02, 0.02, 0.05, 1)
+            self._day_sky.hide()
+            self._night_sky.show()
+            self._scene_fog.setColor(0.02, 0.02, 0.05)
+            self._scene_fog.setExpDensity(0.004)
+            self.cloud_root.hide()
+        else:
+            self.setBackgroundColor(0.78, 0.84, 0.92, 1)
+            self._day_sky.show()
+            self._night_sky.hide()
+            self._scene_fog.setColor(0.75, 0.82, 0.90)
+            self._scene_fog.setExpDensity(0.006)
+            self.cloud_root.show()
+
+        # Update lights if they exist
+        if hasattr(self, '_ambient_light'):
+            self._apply_day_night_lights()
+
+    def _apply_day_night_lights(self):
+        """Set light colours for current day/night mode."""
+        if self._is_night:
+            self._ambient_light.setColor(LVector4(0.06, 0.06, 0.10, 1))
+            self._sun_light.setColor(LVector4(0.10, 0.12, 0.18, 1))
+            self._fill_light.setColor(LVector4(0.04, 0.05, 0.08, 1))
+        else:
+            self._ambient_light.setColor(LVector4(0.3, 0.3, 0.35, 1))
+            self._sun_light.setColor(LVector4(1.0, 0.95, 0.85, 1))
+            self._fill_light.setColor(LVector4(0.3, 0.35, 0.4, 1))
+
+    def _toggle_day_night(self):
+        """Switch between day and night modes."""
+        self._is_night = not self._is_night
+        self._apply_day_night()
+
+        # Update the DevTools button if it exists
+        if hasattr(self, '_debug_btns') and "night_mode" in self._debug_btns:
+            btn = self._debug_btns["night_mode"]
+            self.debug_flags["night_mode"] = self._is_night
+
+            BTN_OFF = (0.20, 0.20, 0.20, 1)
+            BTN_ON = (0.14, 0.50, 0.24, 1)
+            btn["frameColor"] = BTN_ON if self._is_night else BTN_OFF
+            btn["text_fg"] = (0.95, 0.95, 0.95, 1) if self._is_night else (0.55, 0.55, 0.55, 1)
+
+            indicator = btn.getPythonTag("indicator")
+            if indicator:
+                indicator.setText("ON" if self._is_night else "OFF")
+                indicator.setFg((0.3, 1, 0.4, 1) if self._is_night else (0.55, 0.55, 0.55, 1))
 
     def _setup_camera(self):
         """Set up orbit camera."""
@@ -168,6 +244,14 @@ class TurretSimApp(ShowBase):
         self.cam_pitch = -25.0
         self.cam_target = LPoint3(0, 0, 1.2)
 
+        # Camera mode: "orbit" (default) or "first_person"
+        self.cam_mode = "orbit"
+
+        # First-person camera node — parented to turret pitch so it
+        # follows yaw + elevation automatically (same approach as scope cam).
+        # Created later in _setup_turret once turret_parts exists.
+        self._fp_cam_np = None
+
         self._update_camera()
 
         # Mouse state
@@ -175,7 +259,56 @@ class TurretSimApp(ShowBase):
         self._last_mouse_x = 0
         self._last_mouse_y = 0
 
+    def _setup_fp_camera(self):
+        """Attach a first-person camera node to the turret pitch pivot.
+
+        Position: slightly behind the receiver, at operator eye-height,
+        looking along the barrels (same direction as the scope).
+        """
+        self._fp_cam_np = self.turret_parts["pitch"].attachNewNode("fp_cam_anchor")
+        # Operator stands behind turret, eyes ~0.4 m above pivot, ~0.3 m back
+        self._fp_cam_np.setPos(0, -0.35, 0.30)
+
+    def _toggle_camera_mode(self):
+        """Switch between orbit and first-person camera modes."""
+        if self.cam_mode == "orbit":
+            self.cam_mode = "first_person"
+            # Wider FOV for immersive first-person, closer near clip for barrel
+            lens = self.cam.node().getLens()
+            lens.setFov(70)
+            lens.setNearFar(0.05, 10000)
+            # Hide system cursor and show FP crosshair
+            props = WindowProperties()
+            props.setCursorHidden(True)
+            self.win.requestProperties(props)
+            self._fp_crosshair.show()
+            self._mouse_dragging = False
+            # Center mouse so first frame has no jump
+            cx = self.win.getProperties().getXSize() // 2
+            cy = self.win.getProperties().getYSize() // 2
+            self.win.movePointer(0, cx, cy)
+        else:
+            self.cam_mode = "orbit"
+            # Restore default lens for orbit view
+            lens = self.cam.node().getLens()
+            lens.setFov(30)
+            lens.setNearFar(1.0, 100000)
+            # Show system cursor and hide FP crosshair
+            props = WindowProperties()
+            props.setCursorHidden(False)
+            self.win.requestProperties(props)
+            self._fp_crosshair.hide()
+            # Restore orbit camera so transition is instant
+            self._update_orbit_camera()
+
     def _update_camera(self):
+        """Update camera each frame based on current mode."""
+        if self.cam_mode == "first_person" and self._fp_cam_np is not None:
+            self._update_fp_camera()
+        else:
+            self._update_orbit_camera()
+
+    def _update_orbit_camera(self):
         """Position camera based on orbit parameters."""
         h_rad = math.radians(self.cam_heading)
         p_rad = math.radians(self.cam_pitch)
@@ -191,10 +324,25 @@ class TurretSimApp(ShowBase):
         self.camera.setPos(cam_pos)
         self.camera.lookAt(self.cam_target)
 
+    def _update_fp_camera(self):
+        """First-person: camera follows turret yaw/elevation from operator position."""
+        # Get world-space position and orientation of the FP anchor
+        world_pos = self._fp_cam_np.getPos(self.render)
+        self.camera.setPos(world_pos)
+
+        # Look direction = along barrels (pitch node's local +Y in world)
+        mat = self.turret_parts["pitch"].getMat(self.render)
+        forward = LVector3(mat.getRow3(1))  # local Y = forward
+        look_at = world_pos + forward * 100
+        self.camera.lookAt(look_at)
+
     def _setup_turret(self):
         """Build and set up turret model."""
         self.turret_root = self.render.attachNewNode("turret_root")
         self.turret_parts = build_turret_model(self.turret_root)
+
+        # First-person camera anchor (must be after turret_parts exists)
+        self._setup_fp_camera()
 
         # Muzzle flash sprites (billboard quads)
         self.flash_l = self._make_flash_sprite(self.turret_parts["muzzle_l"])
@@ -243,19 +391,34 @@ class TurretSimApp(ShowBase):
         add_text("heat", (1.7, 0.78), TextNode.ARight)
         add_text("orientation", (1.7, 0.71), TextNode.ARight)
 
-        # Bottom left - target info
-        add_text("target_info", (-1.7, -0.75))
-        add_text("target_dist", (-1.7, -0.82))
+        # Bottom right - target info
+        add_text("target_info", (1.7, -0.68), TextNode.ARight)
+        add_text("target_dist", (1.7, -0.75), TextNode.ARight)
+        add_text("target_alt", (1.7, -0.82), TextNode.ARight)
 
-        # Bottom right - weather
-        add_text("weather", (1.7, -0.75), TextNode.ARight)
-        add_text("wind", (1.7, -0.82), TextNode.ARight)
+        # Bottom right - weather (below target info)
+        add_text("weather", (1.7, -0.89), TextNode.ARight, 0.035)
+        add_text("wind", (1.7, -0.94), TextNode.ARight, 0.035)
 
         # Center - hit/miss notifications
         add_text("notification", (0, 0.2), TextNode.ACenter, 0.1)
 
         # Bottom center - stats
         add_text("stats", (0, -0.9), TextNode.ACenter, 0.04)
+
+        # First-person crosshair (centered, hidden by default)
+        self._fp_crosshair = OnscreenText(
+            text="+", pos=(0, 0), scale=0.07,
+            fg=(0, 1, 0, 0.9), shadow=(0, 0, 0, 0.5),
+            align=TextNode.ACenter,
+            parent=self.aspect2d,
+            mayChange=False,
+        )
+        self._fp_crosshair.setBin("fixed", 20)
+        self._fp_crosshair.hide()
+
+        # Camera mode indicator (top center)
+        add_text("cam_mode", (0, 0.92), TextNode.ACenter, 0.035)
 
     def _update_hud(self):
         """Update HUD text every frame."""
@@ -289,42 +452,51 @@ class TurretSimApp(ShowBase):
         else:
             texts["countdown"].setText("")
 
-        # Turret — state, ammo, heat, orientation (convert radians to degrees)
-        texts["turret_state"].setText(f"Turret: {turret.state.value.upper()}")
-        texts["ammo"].setText(
-            f"Ammo: {turret.ammo_remaining}/{turret.config.belt_capacity}")
+        # Turret / target / weather — only update HUD text if panel is hidden
+        # (when panel is visible, _update_devtools handles this data)
+        if not self._debug_panel_visible:
+            texts["turret_state"].setText(
+                f"Turret: {turret.state.value.upper()}")
+            texts["ammo"].setText(
+                f"Ammo: {turret.ammo_remaining}/{turret.config.belt_capacity}")
 
-        heat_pct = turret.heat_level / turret.config.overheat_threshold * 100
-        heat_bar = "#" * int(heat_pct / 5) + "." * (20 - int(heat_pct / 5))
-        texts["heat"].setText(f"Heat: [{heat_bar}] {heat_pct:.0f}%")
+            heat_pct = (turret.heat_level
+                        / turret.config.overheat_threshold * 100)
+            heat_bar = ("#" * int(heat_pct / 5)
+                        + "." * (20 - int(heat_pct / 5)))
+            texts["heat"].setText(f"Heat: [{heat_bar}] {heat_pct:.0f}%")
 
-        az_deg = np.degrees(turret.azimuth)
-        el_deg = np.degrees(turret.elevation)
-        texts["orientation"].setText(
-            f"Az: {az_deg:.1f}\u00b0 El: {el_deg:.1f}\u00b0")
+            az_deg = np.degrees(turret.azimuth)
+            el_deg = np.degrees(turret.elevation)
+            texts["orientation"].setText(
+                f"Az: {az_deg:.1f}\u00b0 El: {el_deg:.1f}\u00b0")
 
-        # Target info — use new Target API
+            w = gm.weather
+            texts["weather"].setText(
+                f"Temp: {w.temperature_c:.0f}\u00b0C | "
+                f"Press: {w.pressure_hpa:.0f}hPa | "
+                f"Humid: {w.humidity_pct:.0f}%")
+            texts["wind"].setText(
+                f"Wind: {w.wind_speed_mps:.1f}m/s "
+                f"from {w.wind_direction_deg:.0f}\u00b0")
+
+        # Target info (always update — shown on right side of HUD)
         if gm.current_target and gm.current_target.alive:
             tgt = gm.current_target
             bearing_rad, elev_rad = tgt.get_bearing_elevation()
             texts["target_info"].setText(
                 f"Target: {tgt.profile.name} | Speed: {tgt.speed:.0f} m/s")
             texts["target_dist"].setText(
-                f"Distance: {tgt.range_from_origin:.0f}m | "
+                f"Range: {tgt.range_from_origin:.0f}m | "
                 f"Bearing: {np.degrees(bearing_rad):.1f}\u00b0 | "
                 f"Elev: {np.degrees(elev_rad):.1f}\u00b0")
+            texts["target_alt"].setText(
+                f"Altitude: {tgt.altitude:.0f}m | "
+                f"Ground range: {tgt.horizontal_range:.0f}m")
         else:
             texts["target_info"].setText("")
             texts["target_dist"].setText("")
-
-        # Weather — use humidity_pct
-        w = gm.weather
-        texts["weather"].setText(
-            f"Temp: {w.temperature_c:.0f}\u00b0C | "
-            f"Press: {w.pressure_hpa:.0f}hPa | "
-            f"Humid: {w.humidity_pct:.0f}%")
-        texts["wind"].setText(
-            f"Wind: {w.wind_speed_mps:.1f}m/s from {w.wind_direction_deg:.0f}\u00b0")
+            texts["target_alt"].setText("")
 
         # Notification
         if gm.state == GameState.TARGET_HIT:
@@ -342,6 +514,13 @@ class TurretSimApp(ShowBase):
             f"Hits: {s.targets_hit} | Missed: {s.targets_missed} | "
             f"Hit Rate: {s.hit_rate:.0f}% | Ammo Used: {s.total_ammo_used}")
 
+        # Camera mode indicator
+        if self.cam_mode == "first_person":
+            texts["cam_mode"].setText("FIRST PERSON  [C] to switch")
+            texts["cam_mode"].setFg((0.3, 1, 0.4, 0.8))
+        else:
+            texts["cam_mode"].setText("")
+
     # =========================================================
     # MONOCULAR (PIP)
     # =========================================================
@@ -356,7 +535,7 @@ class TurretSimApp(ShowBase):
             "scope", 256, 256)
         self.scope_buffer.setSort(-100)
         self.scope_buffer.setClearColorActive(True)
-        self.scope_buffer.setClearColor(LColor(0.55, 0.7, 0.9, 1))
+        self.scope_buffer.setClearColor(LColor(0.78, 0.84, 0.92, 1))
 
         # Deactivate every pre-made DisplayRegion (except the overlay
         # which lives at index 0 and cannot be removed).
@@ -424,8 +603,46 @@ class TurretSimApp(ShowBase):
             text="SCOPE", pos=(-0.42, -0.57), scale=0.03,
             fg=(0, 1, 0, 0.7), align=TextNode.ALeft,
             parent=self.aspect2d,
+            mayChange=True,
         )
         self._scope_label.setBin("fixed", 2)
+
+        # === Thermal imaging overlay ===
+        self._scope_thermal = False
+
+        # A second card in the same position, with a GLSL shader that
+        # reads the scope texture and outputs a thermal colour palette.
+        import os
+        shader_dir = os.path.join(os.path.dirname(__file__), "rendering")
+        thermal_shader = Shader.load(
+            Shader.SL_GLSL,
+            vertex=os.path.join(shader_dir, "thermal_vert.glsl"),
+            fragment=os.path.join(shader_dir, "thermal.glsl"),
+        )
+
+        cm_th = CardMaker("scope_thermal")
+        cm_th.setFrame(-0.45, -0.05, -0.95, -0.55)
+        self.scope_thermal_card = self.aspect2d.attachNewNode(cm_th.generate())
+        self.scope_thermal_card.setTexture(self.scope_texture)
+        self.scope_thermal_card.setShader(thermal_shader)
+        self.scope_thermal_card.setBin("fixed", 1)
+        self.scope_thermal_card.hide()
+
+    def _toggle_scope_thermal(self):
+        """Toggle thermal imaging mode on the scope PIP."""
+        self._scope_thermal = not self._scope_thermal
+        if self._scope_thermal:
+            self.scope_card.hide()
+            self.scope_thermal_card.show()
+            self._scope_label.setText("THERMAL")
+            self._scope_label.setFg((1, 0.4, 0.1, 0.9))
+            self._scope_crosshair.setFg((1, 1, 0.8, 0.9))
+        else:
+            self.scope_thermal_card.hide()
+            self.scope_card.show()
+            self._scope_label.setText("SCOPE")
+            self._scope_label.setFg((0, 1, 0, 0.7))
+            self._scope_crosshair.setFg((0, 1, 0, 0.8))
 
     def _update_scope_camera(self):
         """Scope camera is parented to turret pitch_np — no manual update needed.
@@ -440,7 +657,7 @@ class TurretSimApp(ShowBase):
     # =========================================================
 
     def _setup_scope_debug(self):
-        """Create debug visualizations and a toggle panel (F1)."""
+        """Create DevTools panel — permanent right sidebar with telemetry and debug toggles."""
         from direct.gui.DirectGui import DirectButton, DirectFrame, DGG
 
         # --- Debug state flags ---
@@ -451,130 +668,344 @@ class TurretSimApp(ShowBase):
             "bullet_trails": False,
             "show_fps": True,
             "scope_pip": True,
+            "night_mode": self._is_night,
         }
 
         # --- 3D debug nodes ---
         self._scope_debug_np = self.render.attachNewNode("scope_debug")
 
-        # --- Colors ---
-        BG = (0.12, 0.12, 0.12, 0.92)
-        BTN_OFF = (0.22, 0.22, 0.22, 1)
-        BTN_ON = (0.15, 0.55, 0.25, 1)
-        TEXT_DIM = (0.6, 0.6, 0.6, 1)
-        TEXT_BRIGHT = (1, 1, 1, 1)
+        # --- Palette ---
+        BG          = (0.10, 0.10, 0.10, 0.97)
+        SECTION_BG  = (0.14, 0.14, 0.14, 1)
+        BTN_OFF     = (0.20, 0.20, 0.20, 1)
+        BTN_ON      = (0.14, 0.50, 0.24, 1)
+        TEXT_DIM    = (0.55, 0.55, 0.55, 1)
+        TEXT_BRIGHT = (0.95, 0.95, 0.95, 1)
+        ACCENT      = (1, 0.75, 0, 1)        # orange
+        VAL_COLOR   = (0.75, 0.90, 1.0, 1)   # light blue for values
+        HEAT_LO     = (0.3, 1, 0.4, 1)
+        HEAT_HI     = (1, 0.3, 0.2, 1)
+        SEPARATOR   = (0.25, 0.25, 0.25, 1)
 
-        # --- Panel frame ---
-        pw, ph = 0.46, 0.82
+        # --- Panel geometry (aspect2d coordinates) ---
+        # aspect2d x range is roughly -AR .. +AR where AR = 16/9 ≈ 1.777
+        AR = self.getAspectRatio()
+        pw = 0.58                            # panel width in aspect2d units
+        panel_x = AR - pw                    # left edge of panel
+        ph = 2.0                             # full height (top 1.0 to bottom -1.0)
+
+        self._devtools_pw = pw
+        self._devtools_panel_x = panel_x
+
+        # --- Main frame ---
         self._debug_panel = DirectFrame(
             frameColor=BG,
             frameSize=(0, pw, -ph, 0),
-            pos=(1.22, 0, 0.92),
+            pos=(panel_x, 0, 1.0),
             parent=self.aspect2d,
             sortOrder=100,
         )
 
-        # Title
+        # ── Header ──────────────────────────────────────────────
         OnscreenText(
-            text="DEBUG", pos=(pw / 2, -0.04), scale=0.042,
-            fg=(1, 0.75, 0, 1), align=TextNode.ACenter,
+            text="DEVTOOLS", pos=(pw / 2, -0.035), scale=0.04,
+            fg=ACCENT, align=TextNode.ACenter,
             parent=self._debug_panel,
-            font=None,
+        )
+        # thin separator
+        sep0 = DirectFrame(
+            frameColor=SEPARATOR,
+            frameSize=(0, pw, -0.002, 0),
+            pos=(0, 0, -0.065),
+            parent=self._debug_panel,
         )
 
-        # --- Build toggle buttons ---
-        self._debug_btns = {}
-
-        sections = [
-            ("Visualization", [
-                ("scope_frustum", "Scope Frustum"),
-                ("scope_axes",    "Scope Axes"),
-                ("wireframe",     "Wireframe"),
-                ("bullet_trails", "Bullet Trails"),
-            ]),
-            ("Display", [
-                ("show_fps",  "FPS Meter"),
-                ("scope_pip", "Scope PIP"),
-            ]),
-        ]
-
-        y = -0.10
-        for section_name, items in sections:
-            # Section header
+        # ── Helper: section header ──────────────────────────────
+        def section_header(title, y):
             OnscreenText(
-                text=section_name, pos=(0.04, y), scale=0.03,
+                text=title, pos=(0.04, y + 0.005), scale=0.028,
+                fg=ACCENT, align=TextNode.ALeft,
+                parent=self._debug_panel,
+            )
+            return y - 0.04
+
+        # ── Helper: data row (label + value) ────────────────────
+        self._dt_labels = {}  # keyed name → OnscreenText (for live updates)
+
+        def data_row(name, label_text, y, val_text="—"):
+            OnscreenText(
+                text=label_text, pos=(0.04, y), scale=0.026,
                 fg=TEXT_DIM, align=TextNode.ALeft,
                 parent=self._debug_panel,
             )
-            y -= 0.05
+            vt = OnscreenText(
+                text=val_text, pos=(pw - 0.04, y), scale=0.026,
+                fg=VAL_COLOR, align=TextNode.ARight,
+                parent=self._debug_panel,
+                mayChange=True,
+            )
+            self._dt_labels[name] = vt
+            return y - 0.035
 
-            for key, label in items:
-                is_on = self.debug_flags[key]
-                btn = DirectButton(
-                    text=f"  {label}",
-                    text_align=TextNode.ALeft,
-                    text_fg=TEXT_BRIGHT if is_on else TEXT_DIM,
-                    text_scale=0.035,
-                    pos=(0.04, 0, y),
-                    frameSize=(0, pw - 0.08, -0.025, 0.025),
-                    frameColor=BTN_ON if is_on else BTN_OFF,
-                    relief=DGG.FLAT,
-                    command=self._on_debug_btn,
-                    extraArgs=[key],
-                    parent=self._debug_panel,
-                )
-                self._debug_btns[key] = btn
+        # ══════════════════════════════════════════════════════════
+        # SECTION A — TURRET STATUS
+        # ══════════════════════════════════════════════════════════
+        y = -0.08
+        y = section_header("TURRET", y)
+        y = data_row("t_state",    "State",       y)
+        y = data_row("t_azimuth",  "Azimuth",     y)
+        y = data_row("t_elev",     "Elevation",   y)
+        y = data_row("t_ammo",     "Ammo",        y)
+        y = data_row("t_heat",     "Heat",        y)
+        y = data_row("t_fired",    "Rounds fired", y)
+        y = data_row("t_belts",    "Belts used",  y)
 
-                # Status indicator on the right
-                indicator = OnscreenText(
-                    text="ON" if is_on else "OFF",
-                    pos=(pw - 0.12, y + 0.005), scale=0.028,
-                    fg=(0.3, 1, 0.4, 1) if is_on else (0.5, 0.5, 0.5, 1),
-                    align=TextNode.ALeft,
-                    parent=self._debug_panel,
-                    mayChange=True,
-                )
-                btn.setPythonTag("indicator", indicator)
-                y -= 0.06
+        # separator
+        y -= 0.01
+        DirectFrame(frameColor=SEPARATOR,
+                    frameSize=(0, pw, -0.002, 0),
+                    pos=(0, 0, y), parent=self._debug_panel)
+        y -= 0.015
 
-            y -= 0.02  # Gap between sections
+        # ══════════════════════════════════════════════════════════
+        # SECTION B — TARGET INFO
+        # ══════════════════════════════════════════════════════════
+        y = section_header("TARGET", y)
+        y = data_row("tgt_type",   "Type",      y)
+        y = data_row("tgt_speed",  "Speed",     y)
+        y = data_row("tgt_range",  "Range",     y)
+        y = data_row("tgt_bear",   "Bearing",   y)
+        y = data_row("tgt_elev",   "Elevation", y)
+        y = data_row("tgt_status", "Status",    y)
 
-        # Footer
+        y -= 0.01
+        DirectFrame(frameColor=SEPARATOR,
+                    frameSize=(0, pw, -0.002, 0),
+                    pos=(0, 0, y), parent=self._debug_panel)
+        y -= 0.015
+
+        # ══════════════════════════════════════════════════════════
+        # SECTION C — WEATHER
+        # ══════════════════════════════════════════════════════════
+        y = section_header("WEATHER", y)
+        y = data_row("w_temp",   "Temp",       y)
+        y = data_row("w_press",  "Pressure",   y)
+        y = data_row("w_humid",  "Humidity",   y)
+        y = data_row("w_wind",   "Wind",       y)
+
+        y -= 0.01
+        DirectFrame(frameColor=SEPARATOR,
+                    frameSize=(0, pw, -0.002, 0),
+                    pos=(0, 0, y), parent=self._debug_panel)
+        y -= 0.015
+
+        # ══════════════════════════════════════════════════════════
+        # SECTION D — DEBUG TOGGLES
+        # ══════════════════════════════════════════════════════════
+        y = section_header("DEBUG", y)
+
+        self._debug_btns = {}
+        toggle_items = [
+            ("night_mode",    "Night Mode"),
+            ("scope_frustum", "Scope Frustum"),
+            ("scope_axes",    "Scope Axes"),
+            ("wireframe",     "Wireframe"),
+            ("bullet_trails", "Bullet Trails"),
+            ("show_fps",      "FPS Meter"),
+            ("scope_pip",     "Scope PIP"),
+        ]
+
+        for key, label in toggle_items:
+            is_on = self.debug_flags[key]
+            btn = DirectButton(
+                text=f"  {label}",
+                text_align=TextNode.ALeft,
+                text_fg=TEXT_BRIGHT if is_on else TEXT_DIM,
+                text_scale=0.028,
+                pos=(0.04, 0, y),
+                frameSize=(0, pw - 0.16, -0.018, 0.018),
+                frameColor=BTN_ON if is_on else BTN_OFF,
+                relief=DGG.FLAT,
+                command=self._on_debug_btn,
+                extraArgs=[key],
+                parent=self._debug_panel,
+            )
+            self._debug_btns[key] = btn
+
+            indicator = OnscreenText(
+                text="ON" if is_on else "OFF",
+                pos=(pw - 0.06, y + 0.003), scale=0.024,
+                fg=HEAT_LO if is_on else TEXT_DIM,
+                align=TextNode.ACenter,
+                parent=self._debug_panel,
+                mayChange=True,
+            )
+            btn.setPythonTag("indicator", indicator)
+            y -= 0.045
+
+        y -= 0.01
+        DirectFrame(frameColor=SEPARATOR,
+                    frameSize=(0, pw, -0.002, 0),
+                    pos=(0, 0, y), parent=self._debug_panel)
+        y -= 0.015
+
+        # ══════════════════════════════════════════════════════════
+        # SECTION E — PERFORMANCE
+        # ══════════════════════════════════════════════════════════
+        y = section_header("PERFORMANCE", y)
+        y = data_row("p_fps",     "FPS",           y)
+        y = data_row("p_projs",   "Projectiles",   y)
+
+        # ── Footer ──────────────────────────────────────────────
         OnscreenText(
-            text="F1 — toggle panel", pos=(pw / 2, y - 0.01), scale=0.025,
-            fg=(0.4, 0.4, 0.4, 1), align=TextNode.ACenter,
+            text="]  toggle  |  V  thermal  |  C  camera  |  N  night",
+            pos=(pw / 2, -ph + 0.02), scale=0.022,
+            fg=(0.35, 0.35, 0.35, 1), align=TextNode.ACenter,
             parent=self._debug_panel,
         )
 
-        # Start hidden
-        self._debug_panel.hide()
-        self._debug_panel_visible = False
+        # ── Viewport resize ─────────────────────────────────────
+        # Shrink main 3D viewport to make room for the panel
+        self._debug_panel_visible = True
+        self._debug_panel.show()
+        self._set_viewport_for_panel(True)
 
-        # F1 key
-        self.accept("f1", self._toggle_debug_panel)
+        # Hide right-side HUD texts (now shown in panel)
+        for key in ("turret_state", "ammo", "heat", "orientation",
+                    "weather", "wind", "target_info", "target_dist", "target_alt"):
+            if key in self.hud_texts:
+                self.hud_texts[key].hide()
+
+        # ] key
+        self.accept("]", self._toggle_debug_panel)
+
+    def _set_viewport_for_panel(self, panel_open):
+        """Resize the main camera display region based on panel visibility."""
+        # The main camera DR is typically at index 0, but let's find it
+        # by looking for the one driven by self.cam.
+        if panel_open:
+            # Leave right 25% for panel — map aspect2d panel_x to viewport fraction
+            vp_right = 1.0 - (self._devtools_pw / (2 * self.getAspectRatio()))
+            # Clamp to something reasonable
+            vp_right = max(0.6, min(0.85, vp_right))
+        else:
+            vp_right = 1.0
+
+        # Resize all main window display regions (excluding overlay at idx 0)
+        for i in range(self.win.getNumDisplayRegions()):
+            dr = self.win.getDisplayRegion(i)
+            cam = dr.getCamera()
+            if cam and cam == self.cam:
+                dr.setDimensions(0, vp_right, 0, 1)
+                break
 
     def _toggle_debug_panel(self):
         self._debug_panel_visible = not self._debug_panel_visible
         if self._debug_panel_visible:
             self._debug_panel.show()
+            self._set_viewport_for_panel(True)
+            # Hide right-side HUD texts (info is in panel)
+            for key in ("turret_state", "ammo", "heat", "orientation",
+                        "weather", "wind", "target_info", "target_dist", "target_alt"):
+                if key in self.hud_texts:
+                    self.hud_texts[key].hide()
         else:
             self._debug_panel.hide()
+            self._set_viewport_for_panel(False)
+            # Restore right-side HUD texts
+            for key in ("turret_state", "ammo", "heat", "orientation",
+                        "weather", "wind", "target_info", "target_dist", "target_alt"):
+                if key in self.hud_texts:
+                    self.hud_texts[key].show()
+
+    def _update_devtools(self):
+        """Update live data in the DevTools panel every frame."""
+        if not self._debug_panel_visible:
+            return
+
+        gm = self.game_mgr
+        turret = gm.turret
+        dt = self._dt_labels
+
+        # Turret status
+        state_colors = {
+            "ready":         (0.3, 1, 0.4, 1),
+            "firing":        (1, 0.8, 0.2, 1),
+            "reloading":     (0.4, 0.7, 1, 1),
+            "overheated":    (1, 0.3, 0.2, 1),
+            "barrel_change": (0.8, 0.5, 1, 1),
+        }
+        state_val = turret.state.value
+        dt["t_state"].setText(state_val.upper())
+        dt["t_state"].setFg(state_colors.get(state_val, (0.8, 0.8, 0.8, 1)))
+
+        dt["t_azimuth"].setText(f"{np.degrees(turret.azimuth):.1f}\u00b0")
+        dt["t_elev"].setText(f"{np.degrees(turret.elevation):.1f}\u00b0")
+        dt["t_ammo"].setText(f"{turret.ammo_remaining} / {turret.config.belt_capacity}")
+        heat_pct = turret.heat_level / turret.config.overheat_threshold * 100
+        dt["t_heat"].setText(f"{heat_pct:.0f}%")
+        # Color gradient for heat: green → red
+        ht = min(1.0, heat_pct / 100)
+        dt["t_heat"].setFg((ht, 1 - ht * 0.7, 0.2, 1))
+        dt["t_fired"].setText(str(turret.total_rounds_fired))
+        dt["t_belts"].setText(str(turret.belts_used))
+
+        # Target info
+        if gm.current_target and gm.current_target.alive:
+            tgt = gm.current_target
+            bearing_rad, elev_rad = tgt.get_bearing_elevation()
+            dt["tgt_type"].setText(tgt.profile.name)
+            dt["tgt_speed"].setText(f"{tgt.speed:.0f} m/s")
+            dt["tgt_range"].setText(f"{tgt.range_from_origin:.0f} m")
+            dt["tgt_bear"].setText(f"{np.degrees(bearing_rad):.1f}\u00b0")
+            dt["tgt_elev"].setText(f"{np.degrees(elev_rad):.1f}\u00b0")
+            dt["tgt_status"].setText("ALIVE")
+            dt["tgt_status"].setFg((0.3, 1, 0.4, 1))
+        else:
+            for k in ("tgt_type", "tgt_speed", "tgt_range", "tgt_bear", "tgt_elev"):
+                dt[k].setText("\u2014")
+            if gm.current_target and not gm.current_target.alive:
+                dt["tgt_status"].setText("DESTROYED")
+                dt["tgt_status"].setFg((1, 0.3, 0.2, 1))
+            else:
+                dt["tgt_status"].setText("NONE")
+                dt["tgt_status"].setFg((0.5, 0.5, 0.5, 1))
+
+        # Weather
+        w = gm.weather
+        dt["w_temp"].setText(f"{w.temperature_c:.0f}\u00b0C")
+        dt["w_press"].setText(f"{w.pressure_hpa:.0f} hPa")
+        dt["w_humid"].setText(f"{w.humidity_pct:.0f}%")
+        dt["w_wind"].setText(f"{w.wind_speed_mps:.1f} m/s @ {w.wind_direction_deg:.0f}\u00b0")
+
+        # Performance
+        fps = globalClock.getAverageFrameRate()
+        dt["p_fps"].setText(f"{fps:.0f}")
+        dt["p_fps"].setFg((0.3, 1, 0.4, 1) if fps >= 30 else (1, 0.3, 0.2, 1))
+        n_proj = len(self.tracer_nodes) if hasattr(self, 'tracer_nodes') else 0
+        dt["p_projs"].setText(str(n_proj))
 
     def _on_debug_btn(self, key):
         """Toggle a debug flag via button click."""
+        # Night mode has its own toggle that updates the button
+        if key == "night_mode":
+            self._toggle_day_night()
+            return
+
         self.debug_flags[key] = not self.debug_flags[key]
         is_on = self.debug_flags[key]
 
-        BTN_OFF = (0.22, 0.22, 0.22, 1)
-        BTN_ON = (0.15, 0.55, 0.25, 1)
+        BTN_OFF = (0.20, 0.20, 0.20, 1)
+        BTN_ON = (0.14, 0.50, 0.24, 1)
 
         btn = self._debug_btns[key]
         btn["frameColor"] = BTN_ON if is_on else BTN_OFF
-        btn["text_fg"] = (1, 1, 1, 1) if is_on else (0.6, 0.6, 0.6, 1)
+        btn["text_fg"] = (0.95, 0.95, 0.95, 1) if is_on else (0.55, 0.55, 0.55, 1)
 
         indicator = btn.getPythonTag("indicator")
         if indicator:
             indicator.setText("ON" if is_on else "OFF")
-            indicator.setFg((0.3, 1, 0.4, 1) if is_on else (0.5, 0.5, 0.5, 1))
+            indicator.setFg((0.3, 1, 0.4, 1) if is_on else (0.55, 0.55, 0.55, 1))
 
         self._apply_debug_flags()
 
@@ -588,9 +1019,13 @@ class TurretSimApp(ShowBase):
         self.setFrameRateMeter(self.debug_flags["show_fps"])
 
         if self.debug_flags["scope_pip"]:
-            self.scope_card.show()
+            if self._scope_thermal:
+                self.scope_thermal_card.show()
+            else:
+                self.scope_card.show()
         else:
             self.scope_card.hide()
+            self.scope_thermal_card.hide()
 
     def _update_scope_debug(self):
         """Redraw scope camera debug visuals each frame."""
@@ -666,6 +1101,9 @@ class TurretSimApp(ShowBase):
         self.accept("r", self._on_reload)
         self.accept("enter", self._on_enter)
         self.accept("t", self._on_training)
+        self.accept("c", self._toggle_camera_mode)
+        self.accept("v", self._toggle_scope_thermal)
+        self.accept("n", self._toggle_day_night)
         self.accept("escape", sys.exit)
 
         # Mouse - orbit camera (LMB or MMB)
@@ -705,6 +1143,8 @@ class TurretSimApp(ShowBase):
             )
 
     def _on_mouse_down(self):
+        if self.cam_mode == "first_person":
+            return  # Mouse drag not used in FP mode
         self._mouse_dragging = True
         if self.mouseWatcherNode.hasMouse():
             self._last_mouse_x = self.mouseWatcherNode.getMouseX()
@@ -714,11 +1154,17 @@ class TurretSimApp(ShowBase):
         self._mouse_dragging = False
 
     def _on_scroll(self, direction):
+        if self.cam_mode == "first_person":
+            return  # Scroll not used in FP mode
         self.cam_distance = max(3, min(50, self.cam_distance + direction * 1.5))
         self._update_camera()
 
     def _handle_mouse(self):
-        """Handle mouse orbit."""
+        """Handle mouse input — orbit in orbit mode, turret aim in first-person."""
+        if self.cam_mode == "first_person":
+            self._handle_mouse_fp()
+            return
+
         if not self._mouse_dragging or not self.mouseWatcherNode.hasMouse():
             return
 
@@ -732,6 +1178,28 @@ class TurretSimApp(ShowBase):
         self.cam_heading -= dx * 200
         self.cam_pitch = max(-85, min(85, self.cam_pitch - dy * 100))
         self._update_camera()
+
+    def _handle_mouse_fp(self):
+        """First-person mouse aim: mouse offset from center controls turret."""
+        if not self.mouseWatcherNode.hasMouse():
+            return
+
+        mx = self.mouseWatcherNode.getMouseX()
+        my = self.mouseWatcherNode.getMouseY()
+
+        # Sensitivity: degrees per unit of mouse offset
+        sensitivity = 1.5
+
+        turret = self.game_mgr.turret
+        target_az = turret.target_azimuth + mx * np.radians(sensitivity)
+        target_el = turret.target_elevation + my * np.radians(sensitivity)
+        turret.set_target(target_az, target_el)
+
+        # Re-center the mouse to create continuous aiming
+        props = self.win.getProperties()
+        cx = props.getXSize() // 2
+        cy = props.getYSize() // 2
+        self.win.movePointer(0, cx, cy)
 
     def _handle_keyboard(self, dt):
         """Handle manual turret control — aiming always works, firing only when PLAYING.
@@ -960,6 +1428,11 @@ class TurretSimApp(ShowBase):
         self._update_scope_camera()
         self._update_scope_debug()
         self._update_hud()
+        self._update_devtools()
+
+        # Slow cloud drift (~0.3 deg/s rotation)
+        if hasattr(self, 'cloud_root'):
+            self.cloud_root.setH(self.cloud_root.getH() + dt * 0.3)
 
         return Task.cont
 

@@ -1,0 +1,9 @@
+# Geranium2 (Shahed-136) material
+newmtl Geranium2
+Kd 0.6 0.6 0.6
+Ka 0.1 0.1 0.1
+Ks 0.1 0.1 0.1
+d 1
+Ns 25
+illum 2
+map_Kd textures/Geranium2_BaseColor.png
