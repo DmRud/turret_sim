@@ -7,7 +7,7 @@ import math
 import random as _random
 from panda3d.core import (
     GeomVertexFormat, GeomVertexData, GeomVertexWriter,
-    Geom, GeomTriangles, GeomLines, GeomPoints, GeomNode,
+    Geom, GeomTriangles, GeomLines, GeomNode,
     LVector3, LVector4, LPoint3, LColor,
     NodePath, Material, TextureStage, Texture,
     CardMaker, LineSegs,
@@ -239,27 +239,177 @@ def build_sky_dome(parent: NodePath) -> NodePath:
 
     sky_np = parent.attachNewNode(node)
     sky_np.setLightOff()
+    sky_np.setFogOff()          # prevent scene fog from tinting sky
     sky_np.setBin("background", 0)
     sky_np.setDepthWrite(False)
     return sky_np
 
 
+def _eq_to_enu(ra_hr, dec_deg, lat_deg=50.45, lst_hr=22.0):
+    """Convert equatorial (RA/Dec) to ENU (x=E, y=N, z=Up) direction.
+
+    Args:
+        ra_hr: Right ascension in hours (0-24)
+        dec_deg: Declination in degrees (-90 to +90)
+        lat_deg: Observer latitude (default: Kyiv 50°27' N)
+        lst_hr: Local sidereal time in hours (default: ~22h = autumn midnight)
+
+    Returns:
+        (x, y, z) unit vector in ENU, or None if below horizon.
+    """
+    ra = math.radians(ra_hr * 15.0)
+    dec = math.radians(dec_deg)
+    lat = math.radians(lat_deg)
+    lst = math.radians(lst_hr * 15.0)
+
+    # Hour angle
+    ha = lst - ra
+
+    # Altitude & azimuth
+    sin_alt = (math.sin(dec) * math.sin(lat)
+               + math.cos(dec) * math.cos(lat) * math.cos(ha))
+    alt = math.asin(max(-1.0, min(1.0, sin_alt)))
+
+    if alt < math.radians(-2):  # below horizon
+        return None
+
+    cos_alt = math.cos(alt)
+    if cos_alt < 1e-9:
+        # Near zenith
+        return (0.0, 0.0, 1.0)
+
+    sin_az = -math.cos(dec) * math.sin(ha) / cos_alt
+    cos_az = (math.sin(dec) - math.sin(lat) * sin_alt) / (math.cos(lat) * cos_alt)
+    az = math.atan2(sin_az, cos_az)
+
+    # ENU: x=East, y=North, z=Up
+    x = cos_alt * math.sin(az)
+    y = cos_alt * math.cos(az)
+    z = math.sin(alt)
+    return (x, y, max(0.0, z))
+
+
+# Bright stars visible from Kyiv (50.45°N) — mag < 3.5
+# Format: (name, RA hours, Dec degrees, visual magnitude, B-V color index)
+_BRIGHT_STARS = [
+    # Ursa Major (Big Dipper) — circumpolar at 50°N
+    ("Dubhe",     11.06, 61.75, 1.79, 1.07),
+    ("Merak",     11.02, 56.38, 2.37, 0.03),
+    ("Phecda",    11.90, 53.69, 2.44, 0.04),
+    ("Megrez",    12.26, 57.03, 3.31, 0.07),
+    ("Alioth",    12.90, 55.96, 1.77, -0.02),
+    ("Mizar",     13.40, 54.93, 2.27, 0.02),
+    ("Alkaid",    13.79, 49.31, 1.86, -0.10),
+    # Ursa Minor
+    ("Polaris",    2.53, 89.26, 1.98, 0.60),
+    ("Kochab",    14.84, 74.16, 2.08, 1.47),
+    # Cassiopeia — circumpolar
+    ("Schedar",    0.68, 56.54, 2.23, 1.17),
+    ("Caph",       0.15, 59.15, 2.27, 0.34),
+    ("Gamma Cas",  0.95, 60.72, 2.47, -0.15),
+    ("Ruchbah",    1.91, 60.24, 2.68, 0.13),
+    ("Segin",      1.91, 63.67, 3.37, -0.15),
+    # Cygnus (Summer Triangle)
+    ("Deneb",     20.69, 45.28, 1.25, 0.09),
+    ("Sadr",      20.37, 40.26, 2.20, 0.68),
+    ("Gienah Cyg",20.77, 33.97, 2.46, 1.02),
+    # Lyra
+    ("Vega",      18.62, 38.78, 0.03, 0.00),
+    ("Sheliak",   18.83, 33.36, 3.45, -0.05),
+    ("Sulafat",   18.98, 32.69, 3.24, -0.04),
+    # Aquila
+    ("Altair",    19.85,  8.87, 0.77, 0.22),
+    ("Tarazed",   19.77, 10.61, 2.72, 1.52),
+    # Pegasus (Great Square)
+    ("Markab",    23.08, 15.21, 2.49, -0.04),
+    ("Scheat",    23.06, 28.08, 2.42, 1.67),
+    ("Algenib",    0.22, 15.18, 2.83, -0.11),
+    ("Alpheratz",  0.14, 29.09, 2.06, -0.04),
+    # Andromeda
+    ("Mirach",     1.16, 35.62, 2.05, 1.58),
+    ("Almach",     2.06, 42.33, 2.17, 1.37),
+    # Perseus
+    ("Mirfak",     3.41, 49.86, 1.82, 0.48),
+    ("Algol",      3.14, 40.96, 2.12, -0.05),
+    # Auriga
+    ("Capella",    5.28, 46.00, 0.08, 0.80),
+    ("Menkalinan", 5.99, 44.95, 1.90, 0.08),
+    # Gemini
+    ("Pollux",     7.76, 28.03, 1.14, 1.00),
+    ("Castor",     7.58, 31.89, 1.58, 0.03),
+    ("Alhena",     6.63, 16.40, 1.93, 0.00),
+    # Orion
+    ("Betelgeuse",  5.92,  7.41, 0.50, 1.85),
+    ("Rigel",       5.24, -8.20, 0.13, -0.03),
+    ("Bellatrix",   5.42,  6.35, 1.64, -0.22),
+    ("Mintaka",     5.53, -0.30, 2.23, -0.18),
+    ("Alnilam",     5.60, -1.20, 1.70, -0.18),
+    ("Alnitak",     5.68, -1.94, 1.77, -0.17),
+    ("Saiph",       5.80, -9.67, 2.06, -0.18),
+    # Taurus
+    ("Aldebaran",   4.60, 16.51, 0.85, 1.54),
+    ("Elnath",      5.44, 28.61, 1.65, -0.13),
+    # Canis Major
+    ("Sirius",      6.75, -16.72, -1.46, 0.01),
+    # Canis Minor
+    ("Procyon",     7.66,  5.22, 0.38, 0.42),
+    # Leo
+    ("Regulus",    10.14, 11.97, 1.35, -0.11),
+    ("Denebola",   11.82, 14.57, 2.14, 0.09),
+    ("Algieba",    10.33, 19.84, 2.28, 1.14),
+    # Bootes
+    ("Arcturus",   14.26, 19.18, -0.04, 1.23),
+    ("Izar",       14.75, 27.07, 2.70, 0.97),
+    # Corona Borealis
+    ("Alphecca",   15.58, 26.71, 2.24, 0.03),
+    # Virgo
+    ("Spica",      13.42, -11.16, 0.97, -0.24),
+    # Hercules
+    ("Kornephoros",16.50, 21.49, 2.77, 0.94),
+    ("Rasalgethi", 17.24, 14.39, 3.48, 1.44),
+    # Scorpius (low from Kyiv)
+    ("Antares",    16.49, -26.43, 0.96, 1.83),
+    # Draco — circumpolar
+    ("Eltanin",    17.94, 51.49, 2.23, 1.52),
+    ("Rastaban",   17.51, 52.30, 2.79, 0.94),
+    ("Thuban",     14.07, 64.38, 3.65, -0.05),
+    # Cepheus — circumpolar
+    ("Alderamin",  21.31, 62.59, 2.51, 0.22),
+    ("Errai",      23.66, 77.63, 3.21, 1.03),
+    # Sagittarius (low)
+    ("Kaus Australis", 18.40, -34.38, 1.85, -0.03),
+    # Ophiuchus
+    ("Rasalhague", 17.58, 12.56, 2.08, 0.15),
+    # Libra
+    ("Zubeneschamali", 15.28, -9.38, 2.61, -0.11),
+    # Triangulum
+    ("Mothallah",   1.88, 29.58, 3.41, 0.49),
+    # Aries
+    ("Hamal",       2.12, 23.46, 2.00, 1.15),
+    ("Sheratan",    1.91, 20.81, 2.64, 0.13),
+    # Pisces Austrinus (low)
+    ("Fomalhaut",  22.96, -29.62, 1.16, 0.09),
+]
+
+
 def build_night_sky_dome(parent: NodePath) -> NodePath:
     """
-    Build an inverted hemisphere night sky dome with stars.
+    Build a night sky dome with real stars as seen from Kyiv (50°27'N 30°31'E).
 
-    Bottom ring  → dark horizon      (0.03, 0.03, 0.06)
-    Top vertex   → deep night blue   (0.01, 0.01, 0.04)
+    Uses a catalog of ~70 bright stars (mag < 3.5) placed at correct
+    equatorial positions, converted to horizontal coordinates for the
+    observer's latitude. Background filler stars fill in the rest.
 
-    Stars are rendered as small bright points scattered across the dome.
+    Stars are rendered as billboard quads (CardMaker) so they remain
+    visible at any camera distance.
     """
-    segments = 24
-    rings = 12
+    segments = 32
+    rings = 16
     radius = 2000.0
 
     # Horizon and zenith colours (night)
-    hz_r, hz_g, hz_b = 0.04, 0.04, 0.08
-    zn_r, zn_g, zn_b = 0.01, 0.01, 0.04
+    hz_r, hz_g, hz_b = 0.03, 0.03, 0.07
+    zn_r, zn_g, zn_b = 0.005, 0.005, 0.025
 
     fmt = GeomVertexFormat.getV3n3c4()
     vdata = GeomVertexData("night_sky_dome", fmt, Geom.UHStatic)
@@ -306,53 +456,111 @@ def build_night_sky_dome(parent: NodePath) -> NodePath:
 
     sky_np = parent.attachNewNode(gnode)
     sky_np.setLightOff()
+    sky_np.setFogOff()          # prevent scene fog from obscuring sky + stars
     sky_np.setBin("background", 0)
     sky_np.setDepthWrite(False)
 
-    # --- Stars ---
+    # --- Stars container ---
+    stars_root = sky_np.attachNewNode("stars")
+    stars_root.setLightOff()
+    stars_root.setBin("background", 1)
+    stars_root.setDepthWrite(False)
+    stars_root.setTransparency(TransparencyAttrib.MAlpha)
+
+    star_dist = radius * 0.95
+
+    def _bv_to_rgb(bv):
+        """Approximate B-V color index to RGB."""
+        # Simplified Ballesteros formula
+        bv = max(-0.4, min(2.0, bv))
+        if bv < 0:
+            r = 0.6 + bv * 0.5
+            g = 0.7 + bv * 0.3
+            b = 1.0
+        elif bv < 0.4:
+            r = 0.95 + bv * 0.12
+            g = 0.95 - bv * 0.1
+            b = 1.0 - bv * 0.6
+        elif bv < 1.0:
+            t = (bv - 0.4) / 0.6
+            r = 1.0
+            g = 0.9 - t * 0.35
+            b = 0.4 - t * 0.3
+        else:
+            t = (bv - 1.0) / 1.0
+            r = 1.0
+            g = 0.55 - t * 0.2
+            b = 0.1 - t * 0.08
+        return (max(0, min(1, r)), max(0, min(1, g)), max(0, min(1, b)))
+
+    def _make_star_quad(name, pos, size, r, g, b, alpha=1.0):
+        """Create a billboard star quad at position."""
+        cm = CardMaker(name)
+        hs = size / 2
+        cm.setFrame(-hs, hs, -hs, hs)
+        star = stars_root.attachNewNode(cm.generate())
+        star.setPos(pos[0], pos[1], pos[2])
+        star.setBillboardPointEye()
+        star.setColor(r, g, b, alpha)
+
+    # --- Place real stars (bright catalog) ---
+    for name, ra, dec, mag, bv in _BRIGHT_STARS:
+        enu = _eq_to_enu(ra, dec, lat_deg=50.45, lst_hr=22.0)
+        if enu is None:
+            continue
+        x, y, z = enu
+        if z < 0.02:
+            continue  # too close to horizon, skip
+
+        # Magnitude to size: brighter = larger
+        # mag -1.5 → size 30, mag 3.5 → size 4
+        size = max(3, 30 - mag * 5.5)
+        # Magnitude to brightness
+        brightness = max(0.4, min(1.0, 1.0 - (mag - 0.0) * 0.12))
+
+        sr, sg, sb = _bv_to_rgb(bv)
+        sr *= brightness
+        sg *= brightness
+        sb *= brightness
+
+        px = x * star_dist
+        py = y * star_dist
+        pz = z * star_dist
+        _make_star_quad(name, (px, py, pz), size, sr, sg, sb)
+
+    # --- Filler stars (dimmer, random) ---
     rng = _random.Random(42)
-    star_count = 600
-    star_radius = radius * 0.99  # slightly inside dome
+    for k in range(400):
+        # Random direction on upper hemisphere, avoid low horizon
+        alt = rng.uniform(5, 88)
+        az = rng.uniform(0, 360)
+        alt_rad = math.radians(alt)
+        az_rad = math.radians(az)
 
-    star_vdata = GeomVertexData("stars", GeomVertexFormat.getV3c4(), Geom.UHStatic)
-    star_vertex = GeomVertexWriter(star_vdata, 'vertex')
-    star_col = GeomVertexWriter(star_vdata, 'color')
-    star_pts = GeomPoints(Geom.UHStatic)
+        x = math.cos(alt_rad) * math.sin(az_rad)
+        y = math.cos(alt_rad) * math.cos(az_rad)
+        z = math.sin(alt_rad)
 
-    for k in range(star_count):
-        # Random position on upper hemisphere
-        sphi = rng.uniform(0, math.pi / 2 * 0.92)  # avoid horizon band
-        stheta = rng.uniform(0, 2 * math.pi)
-        sx = star_radius * math.sin(sphi) * math.cos(stheta)
-        sy = star_radius * math.sin(sphi) * math.sin(stheta)
-        sz = star_radius * math.cos(sphi)
-        star_vertex.addData3(sx, sy, sz)
+        px = x * star_dist
+        py = y * star_dist
+        pz = z * star_dist
 
-        # Random brightness and slight color variation
-        brightness = rng.uniform(0.5, 1.0)
+        # Small, dim
+        size = rng.uniform(1.5, 4.0)
+        brightness = rng.uniform(0.15, 0.45)
         tint = rng.random()
         if tint < 0.7:
-            # White
-            star_col.addData4(brightness, brightness, brightness, 1.0)
+            sr, sg, sb = brightness, brightness, brightness
         elif tint < 0.85:
-            # Warm (slightly orange/yellow)
-            star_col.addData4(brightness, brightness * 0.85, brightness * 0.6, 1.0)
+            sr = brightness
+            sg = brightness * 0.9
+            sb = brightness * 0.7
         else:
-            # Cool (slightly blue)
-            star_col.addData4(brightness * 0.7, brightness * 0.8, brightness, 1.0)
+            sr = brightness * 0.7
+            sg = brightness * 0.8
+            sb = brightness
 
-        star_pts.addVertex(k)
-
-    star_geom = Geom(star_vdata)
-    star_geom.addPrimitive(star_pts)
-    star_node = GeomNode("stars")
-    star_node.addGeom(star_geom)
-
-    stars_np = sky_np.attachNewNode(star_node)
-    stars_np.setLightOff()
-    stars_np.setRenderModeThickness(2)
-    stars_np.setBin("background", 1)
-    stars_np.setDepthWrite(False)
+        _make_star_quad(f"filler_{k}", (px, py, pz), size, sr, sg, sb, 0.8)
 
     return sky_np
 

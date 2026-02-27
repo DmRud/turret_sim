@@ -95,6 +95,7 @@ class TurretSimApp(ShowBase):
         self._setup_turret()
         self._setup_hud()
         self._setup_monocular()
+        self._setup_radar()
         self._setup_scope_debug()
 
         # === INPUT ===
@@ -197,12 +198,22 @@ class TurretSimApp(ShowBase):
             self._day_sky.show()
             self._night_sky.hide()
             self._scene_fog.setColor(0.75, 0.82, 0.90)
-            self._scene_fog.setExpDensity(0.006)
+            self._scene_fog.setExpDensity(0.0015)
             self.cloud_root.show()
 
         # Update lights if they exist
         if hasattr(self, '_ambient_light'):
             self._apply_day_night_lights()
+
+        # Sync atmosphere panel values if it exists
+        if hasattr(self, '_atmo'):
+            fog_d = 0.004 if self._is_night else 0.0015
+            amb = 0.08 if self._is_night else 0.30
+            self._atmo["fog_density"] = fog_d
+            self._atmo["ambient"] = amb
+            if hasattr(self, '_atmo_labels'):
+                self._atmo_labels["fog_density"].setText(f"{fog_d:.3f}")
+                self._atmo_labels["ambient"].setText(f"{amb:.3f}")
 
     def _apply_day_night_lights(self):
         """Set light colours for current day/night mode."""
@@ -234,6 +245,10 @@ class TurretSimApp(ShowBase):
             if indicator:
                 indicator.setText("ON" if self._is_night else "OFF")
                 indicator.setFg((0.3, 1, 0.4, 1) if self._is_night else (0.55, 0.55, 0.55, 1))
+
+        # Night → thermal on, Day → thermal off
+        if hasattr(self, '_scope_thermal'):
+            self._set_scope_thermal(self._is_night)
 
     def _setup_camera(self):
         """Set up orbit camera."""
@@ -522,6 +537,209 @@ class TurretSimApp(ShowBase):
             texts["cam_mode"].setText("")
 
     # =========================================================
+    # RADAR
+    # =========================================================
+
+    def _setup_radar(self):
+        """Create a top-left radar display showing target relative to turret."""
+        # Radar geometry in aspect2d coordinates
+        AR = self.getAspectRatio()
+        self._radar_radius = 0.18          # radius in aspect2d units
+        self._radar_max_range = 3000.0     # meters mapped to radar edge
+        # Position: top-left of viewport
+        self._radar_cx = -AR + 0.24        # centre x
+        self._radar_cy = 0.78              # centre y
+
+        # Root node for all radar elements
+        self._radar_root = self.aspect2d.attachNewNode("radar_root")
+        self._radar_root.setBin("fixed", 50)
+
+        # Static elements: background disc, range rings, compass labels
+        self._radar_static = self._radar_root.attachNewNode("radar_static")
+        self._build_radar_static()
+
+        # Dynamic node — redrawn every frame (aim line, target blip)
+        self._radar_dyn_np = self._radar_root.attachNewNode("radar_dynamic")
+
+        # Blip animation timer
+        self._radar_blip_timer = 0.0
+
+    def _build_radar_static(self):
+        """Draw the static radar overlay: background disc, rings, compass."""
+        self._radar_static.node().removeAllChildren()
+
+        cx = self._radar_cx
+        cy = self._radar_cy
+        r = self._radar_radius
+        segs = 64
+
+        # --- Background disc (dark semi-transparent) ---
+        ls_bg = LineSegs("radar_bg")
+        ls_bg.setThickness(1)
+        ls_bg.setColor(0.08, 0.12, 0.08, 0.75)
+        # Fill with a series of thin triangles (fan) isn't easy with LineSegs,
+        # so use a CardMaker square clipped visually by the rings.
+        cm = CardMaker("radar_disc")
+        cm.setFrame(cx - r - 0.005, cx + r + 0.005,
+                     cy - r - 0.005, cy + r + 0.005)
+        cm.setColor(0.05, 0.08, 0.05, 0.70)
+        disc = self._radar_static.attachNewNode(cm.generate())
+        disc.setTransparency(TransparencyAttrib.MAlpha)
+
+        # --- Range rings ---
+        ls = LineSegs("radar_rings")
+        ls.setThickness(1)
+        for ring_frac in (0.333, 0.667, 1.0):
+            rr = r * ring_frac
+            ls.setColor(0.15, 0.35, 0.15, 0.6)
+            for i in range(segs + 1):
+                a = 2 * math.pi * i / segs
+                px = cx + rr * math.sin(a)
+                py = cy + rr * math.cos(a)
+                if i == 0:
+                    ls.moveTo(px, 0, py)
+                else:
+                    ls.drawTo(px, 0, py)
+
+        # Outer ring brighter
+        ls.setColor(0.2, 0.55, 0.2, 0.8)
+        for i in range(segs + 1):
+            a = 2 * math.pi * i / segs
+            px = cx + r * math.sin(a)
+            py = cy + r * math.cos(a)
+            if i == 0:
+                ls.moveTo(px, 0, py)
+            else:
+                ls.drawTo(px, 0, py)
+
+        # --- Cross hairs (N-S, E-W lines) ---
+        ls.setColor(0.12, 0.25, 0.12, 0.4)
+        ls.moveTo(cx, 0, cy - r)
+        ls.drawTo(cx, 0, cy + r)
+        ls.moveTo(cx - r, 0, cy)
+        ls.drawTo(cx + r, 0, cy)
+
+        self._radar_static.attachNewNode(ls.create())
+
+        # --- Compass labels ---
+        for label, angle, offset in [
+            ("N", 0, 0.015), ("E", 90, 0.015),
+            ("S", 180, 0.015), ("W", 270, 0.015),
+        ]:
+            a = math.radians(angle)
+            lx = cx + (r + offset) * math.sin(a)
+            ly = cy + (r + offset) * math.cos(a)
+            OnscreenText(
+                text=label, pos=(lx, ly), scale=0.022,
+                fg=(0.3, 0.7, 0.3, 0.8), align=TextNode.ACenter,
+                parent=self._radar_static,
+            )
+
+        # --- Range label ---
+        if self._radar_max_range >= 1000:
+            range_txt = f"{self._radar_max_range / 1000:.0f}km"
+        else:
+            range_txt = f"{self._radar_max_range:.0f}m"
+        OnscreenText(
+            text=range_txt, pos=(cx + r - 0.02, cy - r + 0.01),
+            scale=0.018, fg=(0.3, 0.6, 0.3, 0.5), align=TextNode.ARight,
+            parent=self._radar_static,
+        )
+
+        # --- "RADAR" title ---
+        OnscreenText(
+            text="RADAR", pos=(cx, cy + r + 0.035), scale=0.022,
+            fg=(0.3, 0.7, 0.3, 0.9), align=TextNode.ACenter,
+            parent=self._radar_static,
+        )
+
+    def _update_radar(self, dt):
+        """Redraw dynamic radar elements: turret aim line and target blip."""
+        self._radar_dyn_np.node().removeAllChildren()
+        self._radar_blip_timer += dt
+
+        cx = self._radar_cx
+        cy = self._radar_cy
+        r = self._radar_radius
+
+        turret = self.game_mgr.turret
+        az = turret.azimuth  # radians, 0=North, CW positive
+
+        # --- Auto-scale radar range to fit target at ~70% of radius ---
+        target = self.game_mgr.current_target
+        if target and target.alive:
+            tx, ty, tz = target.position
+            ground_range = math.sqrt(tx * tx + ty * ty)
+            # Set radar range so target sits at ~70% from centre
+            auto_range = max(ground_range / 0.7, 100.0)
+            # Round up to a clean number
+            if auto_range <= 300:
+                self._radar_max_range = 300.0
+            elif auto_range <= 500:
+                self._radar_max_range = 500.0
+            elif auto_range <= 1000:
+                self._radar_max_range = 1000.0
+            elif auto_range <= 2000:
+                self._radar_max_range = 2000.0
+            elif auto_range <= 3000:
+                self._radar_max_range = 3000.0
+            else:
+                self._radar_max_range = 5000.0
+        max_range = self._radar_max_range
+
+        # Rebuild static rings when range scale changes
+        if not hasattr(self, '_radar_last_range') or self._radar_last_range != max_range:
+            self._radar_last_range = max_range
+            self._build_radar_static()
+
+        ls = LineSegs("radar_dyn")
+
+        # --- Turret aim direction line (from centre outward) ---
+        ls.setThickness(2)
+        ls.setColor(0.3, 1.0, 0.3, 0.9)
+        ls.moveTo(cx, 0, cy)
+        aim_len = r * 0.85
+        ls.drawTo(cx + aim_len * math.sin(az), 0,
+                  cy + aim_len * math.cos(az))
+
+        # --- Target blip ---
+        if target and target.alive:
+            tx, ty, tz = target.position
+            ground_range = math.sqrt(tx * tx + ty * ty)
+            bearing = math.atan2(tx, ty)  # radians, 0=North, CW+
+
+            # Map to radar coordinates (clamp to edge)
+            frac = min(ground_range / max_range, 0.95)
+            bx = cx + r * frac * math.sin(bearing)
+            by = cy + r * frac * math.cos(bearing)
+
+            # Flashing red dot (on/off blink)
+            blink = math.sin(self._radar_blip_timer * 8.0) > 0
+            if blink:
+                dot_r = 0.012
+                segs = 10
+                ls.setThickness(1)
+                ls.setColor(1.0, 0.1, 0.1, 1.0)
+                for i in range(segs + 1):
+                    a = 2 * math.pi * i / segs
+                    px = bx + dot_r * math.sin(a)
+                    py = by + dot_r * math.cos(a)
+                    if i == 0:
+                        ls.moveTo(px, 0, py)
+                    else:
+                        ls.drawTo(px, 0, py)
+
+            # Range text below radar
+            OnscreenText(
+                text=f"{ground_range:.0f}m",
+                pos=(cx, cy - r - 0.025), scale=0.020,
+                fg=(1.0, 0.2, 0.2, 0.9), align=TextNode.ACenter,
+                parent=self._radar_dyn_np,
+            )
+
+        self._radar_dyn_np.attachNewNode(ls.create())
+
+    # =========================================================
     # MONOCULAR (PIP)
     # =========================================================
 
@@ -608,7 +826,7 @@ class TurretSimApp(ShowBase):
         self._scope_label.setBin("fixed", 2)
 
         # === Thermal imaging overlay ===
-        self._scope_thermal = False
+        self._scope_thermal = True  # default: on in night mode
 
         # A second card in the same position, with a GLSL shader that
         # reads the scope texture and outputs a thermal colour palette.
@@ -626,11 +844,20 @@ class TurretSimApp(ShowBase):
         self.scope_thermal_card.setTexture(self.scope_texture)
         self.scope_thermal_card.setShader(thermal_shader)
         self.scope_thermal_card.setBin("fixed", 1)
-        self.scope_thermal_card.hide()
+        # Night mode default: thermal on, normal scope hidden
+        self.scope_card.hide()
+        self.scope_thermal_card.show()
+        self._scope_label.setText("THERMAL")
+        self._scope_label.setFg((1, 0.4, 0.1, 0.9))
+        self._scope_crosshair.setFg((1, 1, 0.8, 0.9))
 
     def _toggle_scope_thermal(self):
         """Toggle thermal imaging mode on the scope PIP."""
-        self._scope_thermal = not self._scope_thermal
+        self._set_scope_thermal(not self._scope_thermal)
+
+    def _set_scope_thermal(self, enabled: bool):
+        """Set thermal imaging mode to a specific state."""
+        self._scope_thermal = enabled
         if self._scope_thermal:
             self.scope_card.hide()
             self.scope_thermal_card.show()
@@ -800,7 +1027,72 @@ class TurretSimApp(ShowBase):
         y -= 0.015
 
         # ══════════════════════════════════════════════════════════
-        # SECTION D — DEBUG TOGGLES
+        # SECTION D — ATMOSPHERE (adjustable rendering settings)
+        # ══════════════════════════════════════════════════════════
+        y = section_header("ATMOSPHERE", y)
+
+        # Current atmosphere values (used by _adjust_atmo)
+        self._atmo = {
+            "fog_density":    0.004 if self._is_night else 0.0015,
+            "ambient":        0.08 if self._is_night else 0.30,
+            "star_brightness": 1.0,
+        }
+
+        atmo_items = [
+            ("fog_density",     "Fog Density",     0.001, 0.000, 0.050),
+            ("ambient",         "Ambient Light",   0.02,  0.00,  1.00),
+            ("star_brightness", "Star Brightness", 0.10,  0.10,  3.00),
+        ]
+
+        self._atmo_labels = {}
+
+        for atmo_key, atmo_label, step, lo, hi in atmo_items:
+            # Label
+            OnscreenText(
+                text=atmo_label, pos=(0.04, y), scale=0.026,
+                fg=TEXT_DIM, align=TextNode.ALeft,
+                parent=self._debug_panel,
+            )
+            # Value display
+            val_text = OnscreenText(
+                text=f"{self._atmo[atmo_key]:.3f}",
+                pos=(pw / 2 + 0.04, y), scale=0.026,
+                fg=VAL_COLOR, align=TextNode.ACenter,
+                parent=self._debug_panel,
+                mayChange=True,
+            )
+            self._atmo_labels[atmo_key] = val_text
+
+            # — button
+            DirectButton(
+                text="\u2013", text_scale=0.032, text_fg=TEXT_BRIGHT,
+                pos=(pw - 0.14, 0, y),
+                frameSize=(-0.022, 0.022, -0.016, 0.016),
+                frameColor=BTN_OFF, relief=DGG.FLAT,
+                command=self._adjust_atmo,
+                extraArgs=[atmo_key, -step, lo, hi],
+                parent=self._debug_panel,
+            )
+            # + button
+            DirectButton(
+                text="+", text_scale=0.032, text_fg=TEXT_BRIGHT,
+                pos=(pw - 0.07, 0, y),
+                frameSize=(-0.022, 0.022, -0.016, 0.016),
+                frameColor=BTN_OFF, relief=DGG.FLAT,
+                command=self._adjust_atmo,
+                extraArgs=[atmo_key, step, lo, hi],
+                parent=self._debug_panel,
+            )
+            y -= 0.040
+
+        y -= 0.01
+        DirectFrame(frameColor=SEPARATOR,
+                    frameSize=(0, pw, -0.002, 0),
+                    pos=(0, 0, y), parent=self._debug_panel)
+        y -= 0.015
+
+        # ══════════════════════════════════════════════════════════
+        # SECTION E — DEBUG TOGGLES
         # ══════════════════════════════════════════════════════════
         y = section_header("DEBUG", y)
 
@@ -850,7 +1142,7 @@ class TurretSimApp(ShowBase):
         y -= 0.015
 
         # ══════════════════════════════════════════════════════════
-        # SECTION E — PERFORMANCE
+        # SECTION F — PERFORMANCE
         # ══════════════════════════════════════════════════════════
         y = section_header("PERFORMANCE", y)
         y = data_row("p_fps",     "FPS",           y)
@@ -1008,6 +1300,28 @@ class TurretSimApp(ShowBase):
             indicator.setFg((0.3, 1, 0.4, 1) if is_on else (0.55, 0.55, 0.55, 1))
 
         self._apply_debug_flags()
+
+    def _adjust_atmo(self, key, delta, lo, hi):
+        """Adjust an atmosphere parameter by delta, clamped to [lo, hi]."""
+        self._atmo[key] = max(lo, min(hi, self._atmo[key] + delta))
+        # Update label
+        self._atmo_labels[key].setText(f"{self._atmo[key]:.3f}")
+
+        # Apply changes
+        if key == "fog_density":
+            self._scene_fog.setExpDensity(self._atmo["fog_density"])
+        elif key == "ambient":
+            val = self._atmo["ambient"]
+            if self._is_night:
+                self._ambient_light.setColor(LVector4(val, val, val * 1.3, 1))
+            else:
+                self._ambient_light.setColor(LVector4(val, val, val * 1.1, 1))
+        elif key == "star_brightness":
+            # Scale star node color — applied as color scale on the stars container
+            b = self._atmo["star_brightness"]
+            stars = self._night_sky.find("**/stars")
+            if not stars.isEmpty():
+                stars.setColorScale(b, b, b, 1)
 
     def _apply_debug_flags(self):
         """Apply debug flag changes that need immediate action."""
@@ -1428,6 +1742,7 @@ class TurretSimApp(ShowBase):
         self._update_scope_camera()
         self._update_scope_debug()
         self._update_hud()
+        self._update_radar(dt)
         self._update_devtools()
 
         # Slow cloud drift (~0.3 deg/s rotation)

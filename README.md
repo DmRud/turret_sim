@@ -30,10 +30,11 @@ Press **ENTER** in the 3D window to start.
 | Space | Fire (hold) |
 | R | Reload |
 | Enter | Start game / Next round |
-| T | Training mode (static target at 700 m) |
+| T | Training mode (static Shahed-136 at 200 m) |
 | C | Toggle first-person / orbit camera |
 | V | Toggle scope thermal imaging |
-| ] | Toggle debug panel |
+| N | Toggle day/night mode |
+| ] | Toggle DevTools panel |
 | LMB / MMB drag | Orbit camera |
 | Scroll | Zoom camera |
 | ESC | Quit |
@@ -250,16 +251,17 @@ turret_sim/
 
 ---
 
-## Target Types
+## Target — Shahed-136 / Geran-2
 
-| Type | Speed | Altitude | Size | Description |
-|------|-------|----------|------|-------------|
-| Drone | 20–60 m/s | 100–500 m | 2.0 m | Small UAV |
-| Light Aircraft | 50–120 m/s | 200–500 m | 8.0 m | Single-engine Cessna-style |
-| Helicopter | 30–80 m/s | 100–400 m | 6.0 m | Rotary-wing |
-| Cruise Missile | 200–300 m/s | 50–200 m | 4.0 m | Fast, low-altitude |
+| Parameter | Value |
+|-----------|-------|
+| Speed | 19–51 m/s (70–185 km/h) |
+| Altitude | 60–2,000 m |
+| Wingspan | 2.5 m |
+| Length | 3.5 m |
+| Hit radius | 1.75 m |
 
-> **Note:** Current game rounds use Light Aircraft only. Other types are available via API.
+Single target type based on real Shahed-136 specifications. Full specs in `assets/shahed/SPECIFICATIONS.md`.
 
 ---
 
