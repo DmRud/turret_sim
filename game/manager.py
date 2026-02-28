@@ -220,10 +220,11 @@ class GameManager:
     # ---- Training mode ----
 
     def start_training(self):
-        """Start training mode with a static target at 200m."""
+        """Start training mode with a moving figure-eight target."""
         self.training_mode = True
         self.training_hits = 0
         self.training_shots = 0
+        self._training_time = 0.0
         self.weather = generate_random_weather()
         self.engine = BallisticsEngine(drag_model="G7")
         self.engine.set_weather(self.weather)
@@ -242,23 +243,70 @@ class GameManager:
         self._spawn_training_target()
         self.state = GameState.TRAINING
 
+    # --- Training figure-eight parameters ---
+    _TRAINING_RADIUS = 500.0    # lobe radius (m) — fits within 1 km
+    _TRAINING_OFFSET = 700.0    # center of eight, north of turret (m)
+    _TRAINING_ALT = 200.0       # constant altitude (m)
+    _TRAINING_SPEED = 40.0      # Shahed-136 cruise speed (m/s)
+    # Angular frequency: ω = speed / radius
+    _TRAINING_OMEGA = _TRAINING_SPEED / _TRAINING_RADIUS  # ≈ 0.08 rad/s
+
+    def _training_pos_vel(self, t: float):
+        """Compute figure-eight position and velocity at time t.
+
+        Lemniscate path:
+            x(t) = R sin(ωt)
+            y(t) = D + (R/2) sin(2ωt)
+            z(t) = H
+        """
+        R = self._TRAINING_RADIUS
+        D = self._TRAINING_OFFSET
+        H = self._TRAINING_ALT
+        w = self._TRAINING_OMEGA
+
+        wt = w * t
+        sin_wt = math.sin(wt)
+        cos_wt = math.cos(wt)
+
+        x = R * sin_wt
+        y = D + (R / 2) * math.sin(2 * wt)
+        z = H
+
+        # Analytical derivatives
+        dx = R * w * cos_wt
+        dy = R * w * math.cos(2 * wt)
+        dz = 0.0
+
+        return np.array([x, y, z]), np.array([dx, dy, dz])
+
     def _spawn_training_target(self):
-        """Spawn a static target due north at training distance."""
+        """Spawn a training target on the figure-eight path."""
         self.engine.clear_all()
-        # Static target: due north (+Y), at altitude
-        target_height = 200.0  # 200m altitude
+        self._training_time = 0.0
+        pos, vel = self._training_pos_vel(0.0)
+        speed = float(np.linalg.norm(vel))
+
         self.current_target = self.target_manager.spawn_target(
             target_type=TargetType.SHAHED_136,
             forced_params={
-                'position': [0, self.training_distance, target_height],
-                'velocity': [0, 0, 0],  # Static — zero velocity
-                'speed': 0,
+                'position': pos.tolist(),
+                'velocity': vel.tolist(),
+                'speed': speed,
             },
         )
         self._emit_event({
             "type": "training_target_spawned",
-            "position": [0, self.training_distance, target_height],
+            "position": pos.tolist(),
         })
+
+    def _update_training_target(self, dt: float):
+        """Advance the training target along the figure-eight path."""
+        self._training_time += dt
+        pos, vel = self._training_pos_vel(self._training_time)
+        t = self.current_target
+        t.position[:] = pos
+        t.velocity[:] = vel
+        t.speed = float(np.linalg.norm(vel))
 
     # ---- Main update ----
 
@@ -283,7 +331,10 @@ class GameManager:
         # === TRAINING MODE ===
         if self.state == GameState.TRAINING:
             self.engine.step(dt)
-            # Check hits on static target
+            # Advance target along figure-eight path
+            if self.current_target and self.current_target.alive:
+                self._update_training_target(dt)
+            # Check hits
             if self.current_target and self.current_target.alive:
                 hits = self.engine.check_all_hits(
                     self.current_target.position,

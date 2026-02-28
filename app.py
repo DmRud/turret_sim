@@ -48,6 +48,7 @@ loadPrcFileData("", """
     show-frame-rate-meter 1
     sync-video 0
     textures-power-2 none
+    load-file-type p3assimp
 """)
 
 from rendering.models import (
@@ -92,6 +93,7 @@ class TurretSimApp(ShowBase):
         self._setup_scene()
         self._setup_lights()
         self._setup_camera()
+        self._setup_truck()
         self._setup_turret()
         self._setup_hud()
         self._setup_monocular()
@@ -110,6 +112,15 @@ class TurretSimApp(ShowBase):
         # === MAIN LOOP ===
         self.taskMgr.add(self._update, "main_update")
 
+        # Auto-start training mode
+        self.game_mgr.start_training()
+        self.api_server.bind(
+            turret=self.game_mgr.turret,
+            target_manager=self.game_mgr.target_manager,
+            game_manager=self.game_mgr,
+            ballistics_engine=self.game_mgr.engine,
+        )
+
         print("\n" + "-"*60)
         print("  Controls:")
         print("    Arrow keys / WASD : Rotate turret")
@@ -126,7 +137,7 @@ class TurretSimApp(ShowBase):
         print("-"*60)
         print(f"\n  REST API:     http://localhost:8420")
         print(f"  WebSocket:    ws://localhost:8421")
-        print(f"\n  Press ENTER to start | T for training")
+        print(f"\n  Training mode started — ENTER for game mode")
         print("="*60 + "\n")
 
     # =========================================================
@@ -136,7 +147,7 @@ class TurretSimApp(ShowBase):
     def _setup_scene(self):
         """Build the 3D environment."""
         # --- Day / Night state ---
-        self._is_night = True  # default: night
+        self._is_night = False  # default: day
 
         # --- Day sky ---
         self._day_sky = build_sky_dome(self.render)
@@ -146,7 +157,9 @@ class TurretSimApp(ShowBase):
         self._night_sky = build_night_sky_dome(self.render)
 
         # Environment (ground, trees, bushes, grass)
+        # Offset down so ground level matches truck tire contact height
         self.env_root = self.render.attachNewNode("environment")
+        self.env_root.setPos(0, 0, -0.520)
         build_environment(self.env_root)
 
         # Cloud layer (semi-transparent quads at altitude)
@@ -254,7 +267,7 @@ class TurretSimApp(ShowBase):
         """Set up orbit camera."""
         self.disableMouse()
 
-        self.cam_distance = 8.0
+        self.cam_distance = 12.0
         self.cam_heading = 30.0
         self.cam_pitch = -25.0
         self.cam_target = LPoint3(0, 0, 1.2)
@@ -285,41 +298,72 @@ class TurretSimApp(ShowBase):
         self._fp_cam_np.setPos(0, -0.35, 0.30)
 
     def _toggle_camera_mode(self):
-        """Switch between orbit and first-person camera modes."""
+        """Switch between orbit and first-person scope view."""
         if self.cam_mode == "orbit":
             self.cam_mode = "first_person"
-            # Wider FOV for immersive first-person, closer near clip for barrel
-            lens = self.cam.node().getLens()
-            lens.setFov(70)
-            lens.setNearFar(0.05, 10000)
-            # Hide system cursor and show FP crosshair
+
+            # Activate fullscreen scope DR, deactivate main camera DR
+            self._fps_scope_dr.setActive(True)
+            self._main_cam_dr.setActive(False)
+
+            # Switch scope lens to FPS FOV (wider than PIP)
+            self.scope_cam.node().setLens(self._fps_scope_lens)
+
+            # Hide PIP scope elements (redundant when fullscreen)
+            self.scope_card.hide()
+            self.scope_thermal_card.hide()
+            self._scope_crosshair.hide()
+            self._scope_label.hide()
+
+            # Show scope reticle overlay
+            self._reticle_root.show()
+            self._fp_crosshair.hide()
+
+            # Hide system cursor for mouse aiming
             props = WindowProperties()
             props.setCursorHidden(True)
             self.win.requestProperties(props)
-            self._fp_crosshair.show()
             self._mouse_dragging = False
+
             # Center mouse so first frame has no jump
             cx = self.win.getProperties().getXSize() // 2
             cy = self.win.getProperties().getYSize() // 2
             self.win.movePointer(0, cx, cy)
         else:
             self.cam_mode = "orbit"
-            # Restore default lens for orbit view
-            lens = self.cam.node().getLens()
-            lens.setFov(30)
-            lens.setNearFar(1.0, 100000)
-            # Show system cursor and hide FP crosshair
+
+            # Deactivate fullscreen scope, restore main camera
+            self._fps_scope_dr.setActive(False)
+            self._main_cam_dr.setActive(True)
+
+            # Restore scope lens to PIP FOV
+            self.scope_cam.node().setLens(self._pip_scope_lens)
+
+            # Restore PIP scope elements
+            self._set_scope_thermal(self._scope_thermal)  # restores correct card
+            self._scope_crosshair.show()
+            self._scope_label.show()
+
+            # Hide scope reticle
+            self._reticle_root.hide()
+
+            # Show system cursor
             props = WindowProperties()
             props.setCursorHidden(False)
             self.win.requestProperties(props)
-            self._fp_crosshair.hide()
-            # Restore orbit camera so transition is instant
+
+            # Restore orbit camera
+            lens = self.cam.node().getLens()
+            lens.setFov(30)
+            lens.setNearFar(1.0, 100000)
             self._update_orbit_camera()
 
     def _update_camera(self):
         """Update camera each frame based on current mode."""
-        if self.cam_mode == "first_person" and self._fp_cam_np is not None:
-            self._update_fp_camera()
+        if self.cam_mode == "first_person":
+            # Scope camera is parented to turret pitch node — auto-updates.
+            # No manual positioning needed.
+            pass
         else:
             self._update_orbit_camera()
 
@@ -351,6 +395,39 @@ class TurretSimApp(ShowBase):
         look_at = world_pos + forward * 100
         self.camera.lookAt(look_at)
 
+    def _setup_truck(self):
+        """Load the Mitsubishi L200 pickup truck and position so the turret
+        sits in the cargo bed (technical configuration).
+
+        The truck EGG is in cm, Z-up.  Bed floor ≈ Z=87 cm, bed center ≈ Y=339 cm.
+        We scale 0.01 (cm→m) then offset so bed floor aligns with world Z=0
+        (where the turret tripod feet rest) and bed center at world origin.
+        """
+        import os
+        from panda3d.core import Filename
+
+        asset_dir = os.path.join(os.path.dirname(__file__),
+                                 "assets", "mitsubishi-pickup-truck")
+        egg_path = os.path.join(asset_dir, "L200.egg")
+
+        if not os.path.isfile(egg_path):
+            print("  [WARNING] Truck model not found, skipping")
+            self._truck_np = None
+            return
+
+        truck = self.loader.loadModel(Filename.fromOsSpecific(egg_path))
+        truck.setScale(0.0056)  # model is ~2× real; 0.0056 → 5.18m length (real L200)
+
+        # User-tuned: turret+soldier sit in cargo bed
+        truck.setPos(-0.020, 1.600, -0.520)
+
+        # Render both sides of polygons (thin panels look transparent otherwise)
+        truck.setTwoSided(True)
+
+        truck.reparentTo(self.render)
+        self._truck_np = truck
+        print("  [OK] Truck model loaded — technical configuration")
+
     def _setup_turret(self):
         """Build and set up turret model."""
         self.turret_root = self.render.attachNewNode("turret_root")
@@ -364,6 +441,65 @@ class TurretSimApp(ShowBase):
         self.flash_r = self._make_flash_sprite(self.turret_parts["muzzle_r"])
         self.flash_l.hide()
         self.flash_r.hide()
+
+        # Soldier model behind turret
+        self._setup_soldier()
+
+    def _setup_soldier(self):
+        """Load and position the Ukrainian soldier model behind the turret.
+
+        Uses a pre-converted static EGG file (converted from the original
+        skinned FBX).  The EGG has plain geometry with no skeleton, so
+        Panda3D can render it directly with correct bounds.
+        """
+        import os
+        from panda3d.core import Filename
+
+        asset_dir = os.path.join(os.path.dirname(__file__),
+                                 "assets", "ukrainian-soldier")
+        egg_path = os.path.join(asset_dir, "Ukrainian_Soldier1.egg")
+
+        if not os.path.isfile(egg_path):
+            print("  [WARNING] Soldier model not found, skipping")
+            self._soldier_np = None
+            return
+
+        model = self.loader.loadModel(Filename.fromOsSpecific(egg_path))
+
+        # Apply diffuse textures to matching mesh parts
+        # ReadyPlayerMe packing: 0=body/skin, 1=lower clothing, 2=upper clothing
+        tex_dir = os.path.join(asset_dir, "textures")
+        tex_map = {
+            "Packed0": ["Body", "Eyes", "default"],
+            "Packed1": ["Bottoms", "Shoes", "Gloves"],
+            "Packed2": ["Tops", "Hats", "Masks"],
+        }
+        for pack_name, mesh_names in tex_map.items():
+            diff_path = os.path.join(
+                tex_dir, f"Ukrainian_Soldier1_{pack_name}_Diffuse.png")
+            if not os.path.isfile(diff_path):
+                continue
+            tex = self.loader.loadTexture(Filename.fromOsSpecific(diff_path))
+            for mesh_name in mesh_names:
+                mesh = model.find(f"**/{mesh_name}")
+                if not mesh.isEmpty():
+                    mesh.setTexture(tex, 1)
+
+        # Parent to yaw node so soldier rotates with turret azimuth
+        self._soldier_np = self.turret_parts["yaw"].attachNewNode("soldier")
+
+        model.reparentTo(self._soldier_np)
+
+        # EGG model is in cm, Z-up, arms pre-posed to grip turret handles
+        model.setScale(0.01)   # cm → m
+        model.setP(90)         # Y-up → Z-up (feet at Z≈0, head at Z≈1.82)
+        model.setH(180)        # Face north (+Y direction)
+
+        # Position: behind the turret grips, feet on ground.
+        # Yaw pivot is at world Z=1.2. Feet need to be at world Z=0.
+        # In yaw-local coords: Z = -1.2 puts feet on the ground.
+        # Y = -0.45 places soldier just behind the turret grips.
+        self._soldier_np.setPos(0, -0.45, -1.2)
 
     def _make_flash_sprite(self, parent_np):
         """Create a muzzle flash billboard."""
@@ -826,7 +962,7 @@ class TurretSimApp(ShowBase):
         self._scope_label.setBin("fixed", 2)
 
         # === Thermal imaging overlay ===
-        self._scope_thermal = True  # default: on in night mode
+        self._scope_thermal = False  # default: off in day mode
 
         # A second card in the same position, with a GLSL shader that
         # reads the scope texture and outputs a thermal colour palette.
@@ -844,12 +980,10 @@ class TurretSimApp(ShowBase):
         self.scope_thermal_card.setTexture(self.scope_texture)
         self.scope_thermal_card.setShader(thermal_shader)
         self.scope_thermal_card.setBin("fixed", 1)
-        # Night mode default: thermal on, normal scope hidden
-        self.scope_card.hide()
-        self.scope_thermal_card.show()
-        self._scope_label.setText("THERMAL")
-        self._scope_label.setFg((1, 0.4, 0.1, 0.9))
-        self._scope_crosshair.setFg((1, 1, 0.8, 0.9))
+        self.scope_thermal_card.hide()
+
+        # Fullscreen scope view for FPS mode
+        self._setup_fps_scope()
 
     def _toggle_scope_thermal(self):
         """Toggle thermal imaging mode on the scope PIP."""
@@ -870,6 +1004,144 @@ class TurretSimApp(ShowBase):
             self._scope_label.setText("SCOPE")
             self._scope_label.setFg((0, 1, 0, 0.7))
             self._scope_crosshair.setFg((0, 1, 0, 0.8))
+
+    # --- Fullscreen scope (FPS mode) ---
+
+    def _setup_fps_scope(self):
+        """Create a fullscreen DisplayRegion driven by the scope camera
+        for first-person shooter mode.  Also builds the reticle overlay.
+        Called once from _setup_monocular (after scope_cam exists).
+        """
+        # Separate lens for FPS mode — wider than PIP scope (5°) but
+        # still zoomed compared to naked eye.
+        self._fps_scope_lens = PerspectiveLens()
+        self._fps_scope_lens.setFov(15)
+        self._fps_scope_lens.setNearFar(0.1, 10000)
+
+        # Keep a reference to the original PIP lens
+        self._pip_scope_lens = self.scope_cam.node().getLens()
+
+        # Fullscreen DR on the main window, driven by scope_cam.
+        # Starts inactive — activated when player presses C.
+        self._fps_scope_dr = self.win.makeDisplayRegion(0, 1, 0, 1)
+        self._fps_scope_dr.setCamera(self.scope_cam)
+        self._fps_scope_dr.setSort(0)        # same sort as main 3D cam; 2D overlays (sort 10/20) draw on top
+        self._fps_scope_dr.setClearColorActive(True)
+        self._fps_scope_dr.setClearColor(LColor(0.02, 0.02, 0.05, 1))
+        self._fps_scope_dr.setActive(False)
+
+        # Find the main 3D camera's DisplayRegion (NOT the 2D overlay DR).
+        # The 3D DR is the one whose camera matches self.cam.
+        self._main_cam_dr = None
+        for i in range(self.win.getNumDisplayRegions()):
+            dr = self.win.getDisplayRegion(i)
+            if dr.getCamera() == self.cam:
+                self._main_cam_dr = dr
+                break
+
+        # Build reticle overlay (hidden by default)
+        self._build_scope_reticle()
+
+    def _build_scope_reticle(self):
+        """Build a scope reticle overlay: circular mask + crosshair + mil-dots."""
+        self._reticle_root = self.aspect2d.attachNewNode("scope_reticle")
+        self._reticle_root.setBin("fixed", 30)
+        self._reticle_root.hide()
+
+        # --- Circular scope mask (black frame with round cutout) ---
+        # We draw 4 large quads that form a frame around a circular opening.
+        # The opening is approximated by many thin radial wedge strips.
+        # Simpler approach: a procedural texture with alpha circle.
+        from panda3d.core import PNMImage, Texture as Tex
+        mask_size = 512
+        img = PNMImage(mask_size, mask_size, 4)  # RGBA
+        img.fill(0, 0, 0)          # black
+        img.alphaFill(1.0)         # fully opaque
+        cx = cy = mask_size / 2
+        radius = mask_size * 0.48  # circle covers ~96% of image
+        for y in range(mask_size):
+            for x in range(mask_size):
+                dx = x - cx
+                dy = y - cy
+                dist = (dx * dx + dy * dy) ** 0.5
+                if dist < radius - 1:
+                    img.setAlpha(x, y, 0.0)  # transparent inside circle
+                elif dist < radius + 1:
+                    # smooth edge (anti-alias)
+                    img.setAlpha(x, y, min(1.0, (dist - radius + 1) / 2.0))
+
+        mask_tex = Tex("scope_mask")
+        mask_tex.load(img)
+        mask_tex.setMagfilter(Tex.FTLinear)
+        mask_tex.setMinfilter(Tex.FTLinear)
+
+        # Fullscreen card with the mask
+        cm = CardMaker("scope_mask_card")
+        # aspect2d: x range ≈ [-AR, AR], y range = [-1, 1]
+        # use a square centered on screen, tall enough to fill vertically
+        cm.setFrame(-1.35, 1.35, -1.0, 1.0)
+        mask_card = self._reticle_root.attachNewNode(cm.generate())
+        mask_card.setTexture(mask_tex)
+        mask_card.setTransparency(TransparencyAttrib.MAlpha)
+
+        # --- Crosshair lines (LineSegs) ---
+        line_color = LColor(0, 1, 0, 0.7)
+
+        # Horizontal line (gap in center)
+        ls = LineSegs("reticle_h")
+        ls.setThickness(1.5)
+        ls.setColor(line_color)
+        # Left segment
+        ls.moveTo(-0.45, 0, 0)
+        ls.drawTo(-0.02, 0, 0)
+        # Right segment
+        ls.moveTo(0.02, 0, 0)
+        ls.drawTo(0.45, 0, 0)
+        self._reticle_root.attachNewNode(ls.create())
+
+        # Vertical line (gap in center)
+        ls = LineSegs("reticle_v")
+        ls.setThickness(1.5)
+        ls.setColor(line_color)
+        # Bottom segment
+        ls.moveTo(0, 0, -0.45)
+        ls.drawTo(0, 0, -0.02)
+        # Top segment
+        ls.moveTo(0, 0, 0.02)
+        ls.drawTo(0, 0, 0.45)
+        self._reticle_root.attachNewNode(ls.create())
+
+        # --- Mil-dot tick marks along crosshairs ---
+        tick_color = LColor(0, 1, 0, 0.5)
+        tick_half = 0.012   # half-height of each tick mark
+        mil_spacing = 0.05  # spacing between mil-dots
+
+        ls = LineSegs("reticle_ticks")
+        ls.setThickness(1.0)
+        ls.setColor(tick_color)
+        for i in range(1, 9):
+            d = i * mil_spacing
+            # Horizontal axis ticks (vertical tick marks)
+            for sign in (-1, 1):
+                x = sign * d
+                if abs(x) < 0.45:
+                    ls.moveTo(x, 0, -tick_half)
+                    ls.drawTo(x, 0, tick_half)
+            # Vertical axis ticks (horizontal tick marks)
+            for sign in (-1, 1):
+                z = sign * d
+                if abs(z) < 0.45:
+                    ls.moveTo(-tick_half, 0, z)
+                    ls.drawTo(tick_half, 0, z)
+        self._reticle_root.attachNewNode(ls.create())
+
+        # Center dot
+        center_dot = OnscreenText(
+            text="·", pos=(0, -0.01), scale=0.05,
+            fg=(0, 1, 0, 0.9), shadow=(0, 0, 0, 0),
+            align=TextNode.ACenter,
+            parent=self._reticle_root,
+        )
 
     def _update_scope_camera(self):
         """Scope camera is parented to turret pitch_np — no manual update needed.
@@ -1420,6 +1692,7 @@ class TurretSimApp(ShowBase):
         self.accept("n", self._toggle_day_night)
         self.accept("escape", sys.exit)
 
+
         # Mouse - orbit camera (LMB or MMB)
         self.accept("mouse1", self._on_mouse_down)
         self.accept("mouse1-up", self._on_mouse_up)
@@ -1470,7 +1743,7 @@ class TurretSimApp(ShowBase):
     def _on_scroll(self, direction):
         if self.cam_mode == "first_person":
             return  # Scroll not used in FP mode
-        self.cam_distance = max(3, min(50, self.cam_distance + direction * 1.5))
+        self.cam_distance = max(3, min(50, self.cam_distance + direction * 0.8))
         self._update_camera()
 
     def _handle_mouse(self):
@@ -1489,8 +1762,8 @@ class TurretSimApp(ShowBase):
         self._last_mouse_x = mx
         self._last_mouse_y = my
 
-        self.cam_heading -= dx * 200
-        self.cam_pitch = max(-85, min(85, self.cam_pitch - dy * 100))
+        self.cam_heading -= dx * 100
+        self.cam_pitch = max(-85, min(85, self.cam_pitch - dy * 60))
         self._update_camera()
 
     def _handle_mouse_fp(self):
@@ -1501,8 +1774,8 @@ class TurretSimApp(ShowBase):
         mx = self.mouseWatcherNode.getMouseX()
         my = self.mouseWatcherNode.getMouseY()
 
-        # Sensitivity: degrees per unit of mouse offset
-        sensitivity = 1.5
+        # Sensitivity: degrees per unit of mouse offset (low = precise)
+        sensitivity = 0.4
 
         turret = self.game_mgr.turret
         target_az = turret.target_azimuth + mx * np.radians(sensitivity)
@@ -1515,6 +1788,10 @@ class TurretSimApp(ShowBase):
         cy = props.getYSize() // 2
         self.win.movePointer(0, cx, cy)
 
+    def _handle_mouse_orbit_aim(self):
+        """In orbit mode, use mouse scroll-click drag to aim turret precisely."""
+        pass
+
     def _handle_keyboard(self, dt):
         """Handle manual turret control — aiming always works, firing only when PLAYING.
 
@@ -1522,7 +1799,7 @@ class TurretSimApp(ShowBase):
         so that simultaneous X+Y axis input is always detected reliably.
         """
         turret = self.game_mgr.turret
-        manual_speed_rad = np.radians(30.0)  # 30 deg/s in radians
+        manual_speed_rad = np.radians(15.0)  # 15 deg/s — precise aiming
 
         # Poll keyboard state directly — guaranteed to read all held keys
         is_down = self.mouseWatcherNode.isButtonDown
@@ -1592,10 +1869,14 @@ class TurretSimApp(ShowBase):
                     )
                     pos = target.position
                     self.target_np.setPos(pos[0], pos[1], pos[2])
-            if not self.game_mgr.training_mode:
-                # Update position for moving targets
-                pos = target.position
-                self.target_np.setPos(pos[0], pos[1], pos[2])
+            # Update position every frame (training targets now move too)
+            pos = target.position
+            self.target_np.setPos(pos[0], pos[1], pos[2])
+            # Orient model to face along velocity vector
+            vx, vy = target.velocity[0], target.velocity[1]
+            if vx != 0 or vy != 0:
+                heading = -math.degrees(math.atan2(vx, vy))
+                self.target_np.setH(heading)
             self.target_np.show()
         else:
             if self.target_np:
