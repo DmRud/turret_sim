@@ -5,6 +5,7 @@ Creates all geometry programmatically (no external assets needed).
 
 import math
 import random as _random
+import config as CFG
 from panda3d.core import (
     GeomVertexFormat, GeomVertexData, GeomVertexWriter,
     Geom, GeomTriangles, GeomLines, GeomNode,
@@ -618,7 +619,7 @@ def build_cloud_layer(parent: NodePath) -> NodePath:
         card = cloud_root.attachNewNode(cm.generate())
         card.setTexture(tex)
         card.setTransparency(TransparencyAttrib.MAlpha)
-        card.setLightOff()
+        # No setLightOff — clouds receive Spotlight illumination
         card.setBin("fixed", 5)
         card.setDepthWrite(False)
 
@@ -1000,6 +1001,14 @@ def build_target_model(parent: NodePath, target_type: str, radius: float) -> Nod
         wing = make_box("wing", radius * 3, radius * 0.1, radius * 0.5, color)
         wing.reparentTo(target_np)
 
+    # Surface material — reflects spotlight with grey specular
+    mat = Material("target_surface")
+    mat.setAmbient(CFG.TARGET_MAT_AMBIENT)
+    mat.setDiffuse(CFG.TARGET_MAT_DIFFUSE)
+    mat.setSpecular(CFG.TARGET_MAT_SPECULAR)
+    mat.setShininess(CFG.TARGET_MAT_SHININESS)
+    target_np.setMaterial(mat, 1)
+
     return target_np
 
 
@@ -1052,5 +1061,13 @@ def build_training_target(parent: NodePath, **kwargs) -> NodePath:
         wing = make_box("wing", 2.5, 0.6, 0.04, (0.45, 0.45, 0.42, 1))
         wing.reparentTo(wrapper)
         wing.setPos(0, 0.3, 0)
+
+    # Surface material — matte military paint with slight specular reflection
+    mat = Material("shahed_surface")
+    mat.setAmbient(CFG.TARGET_MAT_AMBIENT)
+    mat.setDiffuse(CFG.TARGET_MAT_DIFFUSE)
+    mat.setSpecular(CFG.TARGET_MAT_SPECULAR)
+    mat.setShininess(CFG.TARGET_MAT_SHININESS)
+    wrapper.setMaterial(mat, 1)
 
     return wrapper

@@ -13,6 +13,7 @@ Round flow:
 
 import math
 import numpy as np
+import config as CFG
 from dataclasses import dataclass, field
 from typing import List, Optional, Callable
 from enum import Enum
@@ -243,13 +244,12 @@ class GameManager:
         self._spawn_training_target()
         self.state = GameState.TRAINING
 
-    # --- Training figure-eight parameters ---
-    _TRAINING_RADIUS = 500.0    # lobe radius (m) — fits within 1 km
-    _TRAINING_OFFSET = 700.0    # center of eight, north of turret (m)
-    _TRAINING_ALT = 200.0       # constant altitude (m)
-    _TRAINING_SPEED = 40.0      # Shahed-136 cruise speed (m/s)
-    # Angular frequency: ω = speed / radius
-    _TRAINING_OMEGA = _TRAINING_SPEED / _TRAINING_RADIUS  # ≈ 0.08 rad/s
+    # --- Training figure-eight parameters (from config.py) ---
+    _TRAINING_RADIUS = CFG.TRAINING_RADIUS
+    _TRAINING_OFFSET = CFG.TRAINING_OFFSET
+    _TRAINING_ALT = CFG.TRAINING_ALT
+    _TRAINING_SPEED = CFG.TRAINING_SPEED
+    _TRAINING_OMEGA = _TRAINING_SPEED / _TRAINING_RADIUS
 
     def _training_pos_vel(self, t: float):
         """Compute figure-eight position and velocity at time t.

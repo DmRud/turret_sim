@@ -21,6 +21,7 @@ import sys
 import math
 import random
 import numpy as np
+import config as CFG
 
 from direct.showbase.ShowBase import ShowBase
 from direct.task import Task
@@ -29,7 +30,8 @@ from direct.gui.OnscreenText import OnscreenText
 from panda3d.core import (
     LVector3, LVector4, LPoint3, LColor,
     NodePath, GeomNode, LineSegs,
-    AmbientLight, DirectionalLight, PointLight, Fog,
+    Geom, GeomVertexFormat, GeomVertexData, GeomVertexWriter, GeomTriangles,
+    AmbientLight, DirectionalLight, PointLight, Spotlight, Fog,
     TextNode, CardMaker,
     WindowProperties, FrameBufferProperties,
     GraphicsOutput, GraphicsPipe, Texture,
@@ -108,9 +110,16 @@ class TurretSimApp(ShowBase):
         self.tracer_nodes = []
         self.muzzle_flash_timer = 0
         self.next_barrel = 0  # Alternate L/R
+        self._beam_node = None       # Searchlight beam cone
+        self._beam_splash = None     # Light splash billboard on target
+        self._beam_cloud_splashes = []  # Beam-cloud intersection glows
 
         # === MAIN LOOP ===
         self.taskMgr.add(self._update, "main_update")
+
+        # Apply startup defaults from config
+        if CFG.START_FIRST_PERSON and self.cam_mode == "orbit":
+            self._toggle_camera_mode()
 
         # Auto-start training mode
         self.game_mgr.start_training()
@@ -147,7 +156,7 @@ class TurretSimApp(ShowBase):
     def _setup_scene(self):
         """Build the 3D environment."""
         # --- Day / Night state ---
-        self._is_night = False  # default: day
+        self._is_night = CFG.START_NIGHT_MODE
 
         # --- Day sky ---
         self._day_sky = build_sky_dome(self.render)
@@ -159,7 +168,7 @@ class TurretSimApp(ShowBase):
         # Environment (ground, trees, bushes, grass)
         # Offset down so ground level matches truck tire contact height
         self.env_root = self.render.attachNewNode("environment")
-        self.env_root.setPos(0, 0, -0.520)
+        self.env_root.setPos(0, 0, CFG.GROUND_Z)
         build_environment(self.env_root)
 
         # Cloud layer (semi-transparent quads at altitude)
@@ -200,18 +209,18 @@ class TurretSimApp(ShowBase):
     def _apply_day_night(self):
         """Apply full day/night visual state (sky, fog, background, clouds)."""
         if self._is_night:
-            self.setBackgroundColor(0.02, 0.02, 0.05, 1)
+            self.setBackgroundColor(*CFG.NIGHT_BG)
             self._day_sky.hide()
             self._night_sky.show()
-            self._scene_fog.setColor(0.02, 0.02, 0.05)
-            self._scene_fog.setExpDensity(0.004)
+            self._scene_fog.setColor(*CFG.NIGHT_FOG_COLOR)
+            self._scene_fog.setExpDensity(CFG.NIGHT_FOG_DENSITY)
             self.cloud_root.hide()
         else:
-            self.setBackgroundColor(0.78, 0.84, 0.92, 1)
+            self.setBackgroundColor(*CFG.DAY_BG)
             self._day_sky.show()
             self._night_sky.hide()
-            self._scene_fog.setColor(0.75, 0.82, 0.90)
-            self._scene_fog.setExpDensity(0.0015)
+            self._scene_fog.setColor(*CFG.DAY_FOG_COLOR)
+            self._scene_fog.setExpDensity(CFG.DAY_FOG_DENSITY)
             self.cloud_root.show()
 
         # Update lights if they exist
@@ -220,7 +229,7 @@ class TurretSimApp(ShowBase):
 
         # Sync atmosphere panel values if it exists
         if hasattr(self, '_atmo'):
-            fog_d = 0.004 if self._is_night else 0.0015
+            fog_d = CFG.NIGHT_FOG_DENSITY if self._is_night else CFG.DAY_FOG_DENSITY
             amb = 0.08 if self._is_night else 0.30
             self._atmo["fog_density"] = fog_d
             self._atmo["ambient"] = amb
@@ -231,13 +240,13 @@ class TurretSimApp(ShowBase):
     def _apply_day_night_lights(self):
         """Set light colours for current day/night mode."""
         if self._is_night:
-            self._ambient_light.setColor(LVector4(0.06, 0.06, 0.10, 1))
-            self._sun_light.setColor(LVector4(0.10, 0.12, 0.18, 1))
-            self._fill_light.setColor(LVector4(0.04, 0.05, 0.08, 1))
+            self._ambient_light.setColor(LVector4(*CFG.NIGHT_AMBIENT))
+            self._sun_light.setColor(LVector4(*CFG.NIGHT_SUN))
+            self._fill_light.setColor(LVector4(*CFG.NIGHT_FILL))
         else:
-            self._ambient_light.setColor(LVector4(0.3, 0.3, 0.35, 1))
-            self._sun_light.setColor(LVector4(1.0, 0.95, 0.85, 1))
-            self._fill_light.setColor(LVector4(0.3, 0.35, 0.4, 1))
+            self._ambient_light.setColor(LVector4(*CFG.DAY_AMBIENT))
+            self._sun_light.setColor(LVector4(*CFG.DAY_SUN))
+            self._fill_light.setColor(LVector4(*CFG.DAY_FILL))
 
     def _toggle_day_night(self):
         """Switch between day and night modes."""
@@ -267,10 +276,10 @@ class TurretSimApp(ShowBase):
         """Set up orbit camera."""
         self.disableMouse()
 
-        self.cam_distance = 12.0
-        self.cam_heading = 30.0
-        self.cam_pitch = -25.0
-        self.cam_target = LPoint3(0, 0, 1.2)
+        self.cam_distance = CFG.CAM_DISTANCE
+        self.cam_heading = CFG.CAM_HEADING
+        self.cam_pitch = CFG.CAM_PITCH
+        self.cam_target = LPoint3(*CFG.CAM_TARGET)
 
         # Camera mode: "orbit" (default) or "first_person"
         self.cam_mode = "orbit"
@@ -295,7 +304,7 @@ class TurretSimApp(ShowBase):
         """
         self._fp_cam_np = self.turret_parts["pitch"].attachNewNode("fp_cam_anchor")
         # Operator stands behind turret, eyes ~0.4 m above pivot, ~0.3 m back
-        self._fp_cam_np.setPos(0, -0.35, 0.30)
+        self._fp_cam_np.setPos(*CFG.FP_CAM_OFFSET)
 
     def _toggle_camera_mode(self):
         """Switch between orbit and first-person scope view."""
@@ -416,10 +425,10 @@ class TurretSimApp(ShowBase):
             return
 
         truck = self.loader.loadModel(Filename.fromOsSpecific(egg_path))
-        truck.setScale(0.0056)  # model is ~2× real; 0.0056 → 5.18m length (real L200)
+        truck.setScale(CFG.TRUCK_SCALE)
 
         # User-tuned: turret+soldier sit in cargo bed
-        truck.setPos(-0.020, 1.600, -0.520)
+        truck.setPos(*CFG.TRUCK_POS)
 
         # Render both sides of polygons (thin panels look transparent otherwise)
         truck.setTwoSided(True)
@@ -444,6 +453,9 @@ class TurretSimApp(ShowBase):
 
         # Soldier model behind turret
         self._setup_soldier()
+
+        # Second soldier with searchlight
+        self._setup_searchlight_soldier()
 
     def _setup_soldier(self):
         """Load and position the Ukrainian soldier model behind the turret.
@@ -491,27 +503,388 @@ class TurretSimApp(ShowBase):
         model.reparentTo(self._soldier_np)
 
         # EGG model is in cm, Z-up, arms pre-posed to grip turret handles
-        model.setScale(0.01)   # cm → m
+        model.setScale(CFG.SOLDIER_SCALE)
         model.setP(90)         # Y-up → Z-up (feet at Z≈0, head at Z≈1.82)
         model.setH(180)        # Face north (+Y direction)
 
-        # Position: behind the turret grips, feet on ground.
-        # Yaw pivot is at world Z=1.2. Feet need to be at world Z=0.
-        # In yaw-local coords: Z = -1.2 puts feet on the ground.
-        # Y = -0.45 places soldier just behind the turret grips.
-        self._soldier_np.setPos(0, -0.45, -1.2)
+        self._soldier_np.setPos(*CFG.GUNNER_OFFSET)
+
+    def _setup_searchlight_soldier(self):
+        """Load a second soldier with a handheld searchlight.
+
+        The soldier stands on the ground 5 m from the truck and rotates
+        each frame to face the current target.  A procedural flashlight
+        model is attached at hand height, and the Spotlight node lives
+        at the flashlight lens so the beam follows automatically.
+        """
+        import os
+        from panda3d.core import Filename
+
+        asset_dir = os.path.join(os.path.dirname(__file__),
+                                 "assets", "ukrainian-soldier")
+        egg_path = os.path.join(asset_dir, "Ukrainian_Soldier1.egg")
+
+        if not os.path.isfile(egg_path):
+            print("  [WARNING] Soldier model not found, skipping searchlight soldier")
+            self._searchlight_np = None
+            self._sl_soldier_np = None
+            return
+
+        model = self.loader.loadModel(Filename.fromOsSpecific(egg_path))
+
+        # Same texture mapping as primary soldier
+        tex_dir = os.path.join(asset_dir, "textures")
+        tex_map = {
+            "Packed0": ["Body", "Eyes", "default"],
+            "Packed1": ["Bottoms", "Shoes", "Gloves"],
+            "Packed2": ["Tops", "Hats", "Masks"],
+        }
+        for pack_name, mesh_names in tex_map.items():
+            diff_path = os.path.join(
+                tex_dir, f"Ukrainian_Soldier1_{pack_name}_Diffuse.png")
+            if not os.path.isfile(diff_path):
+                continue
+            tex = self.loader.loadTexture(Filename.fromOsSpecific(diff_path))
+            for mesh_name in mesh_names:
+                mesh = model.find(f"**/{mesh_name}")
+                if not mesh.isEmpty():
+                    mesh.setTexture(tex, 1)
+
+        # --- Soldier node (parented to render, on the ground) ---
+        soldier2 = self.render.attachNewNode("soldier_searchlight")
+        model.reparentTo(soldier2)
+        model.setScale(CFG.SOLDIER_SCALE)
+        model.setP(90)
+        model.setH(180)
+
+        soldier2.setPos(*CFG.SL_SOLDIER_POS)
+        self._sl_soldier_np = soldier2
+
+        # --- Procedural flashlight model ---
+        # After soldier2.setH() rotation the flashlight follows.
+        flashlight = soldier2.attachNewNode("flashlight")
+        flashlight.setPos(*CFG.FLASHLIGHT_POS)
+
+        # Body: dark grey cylinder, 30 cm long, 4 cm radius, along +Y
+        body = make_cylinder("fl_body", 0.04, 0.30, 8, (0.15, 0.15, 0.15, 1))
+        body.reparentTo(flashlight)
+        body.setP(-90)  # stand cylinder upright then tilt forward along +Y
+
+        # Lens: yellow-ish glass at front end
+        lens_part = make_cylinder("fl_lens", 0.05, 0.03, 8, (1.0, 0.95, 0.5, 0.8))
+        lens_part.reparentTo(flashlight)
+        lens_part.setP(-90)
+        lens_part.setPos(0, 0.30, 0)  # at front of body
+        lens_part.setTransparency(TransparencyAttrib.MAlpha)
+
+        # --- Spotlight at the flashlight lens tip ---
+        sl = Spotlight("searchlight")
+        sl.setColor(LVector4(*CFG.SL_COLOR))
+        sl.setAttenuation(LVector3(*CFG.SL_ATTENUATION))
+        sl.setExponent(CFG.SL_EXPONENT)
+        sl_lens = PerspectiveLens()
+        sl_lens.setFov(CFG.SL_FOV)
+        sl_lens.setAspectRatio(1.0)
+        sl_lens.setNearFar(0.5, 2000)
+        sl.setLens(sl_lens)
+        sl.setShadowCaster(True, CFG.SL_SHADOW_RES, CFG.SL_SHADOW_RES)
+
+        # Parent spotlight to flashlight so it rotates with the soldier
+        self._searchlight_np = flashlight.attachNewNode(sl)
+        self._searchlight_np.setPos(0, 0.33, 0)  # just past the lens
+
+        self.render.setLight(self._searchlight_np)
+        print("  [OK] Searchlight soldier loaded")
+
+    def _update_searchlight(self):
+        """Rotate the searchlight soldier toward the target, point the
+        spotlight, and draw a visible beam cone + splash."""
+        # Clean up previous frame's beam
+        if self._beam_node:
+            self._beam_node.removeNode()
+            self._beam_node = None
+        if self._beam_splash:
+            self._beam_splash.removeNode()
+            self._beam_splash = None
+        for cs in self._beam_cloud_splashes:
+            cs.removeNode()
+        self._beam_cloud_splashes.clear()
+
+        if not getattr(self, '_searchlight_np', None):
+            return
+        if not getattr(self, '_sl_soldier_np', None):
+            return
+
+        target = self.game_mgr.current_target
+        if target and target.alive:
+            tx, ty, tz = target.position
+            tgt = LPoint3(tx, ty, tz)
+
+            # --- Rotate soldier to face target (yaw only) ---
+            sol_pos = self._sl_soldier_np.getPos(self.render)
+            dx = tx - sol_pos[0]
+            dy = ty - sol_pos[1]
+            bearing = math.degrees(math.atan2(dx, dy))  # 0=+Y(north), CW+
+            self._sl_soldier_np.setH(-bearing)
+
+            # --- Point spotlight at target (handles elevation) ---
+            self._searchlight_np.lookAt(self.render, tgt)
+
+            # --- Volumetric beam cone (triangulated mesh, additive blend) ---
+            sl_pos = self._searchlight_np.getPos(self.render)
+            bx = tgt[0] - sl_pos[0]
+            by = tgt[1] - sl_pos[1]
+            bz = tgt[2] - sl_pos[2]
+            dist = (bx*bx + by*by + bz*bz) ** 0.5
+            if dist < 1:
+                return
+
+            half_angle = math.radians(CFG.BEAM_HALF_ANGLE_DEG)
+            base_r = dist * math.tan(half_angle)
+
+            fwd = LVector3(bx / dist, by / dist, bz / dist)
+            if abs(fwd[2]) < 0.9:
+                world_up = LVector3(0, 0, 1)
+            else:
+                world_up = LVector3(0, 1, 0)
+            right = fwd.cross(world_up)
+            right.normalize()
+            up = right.cross(fwd)
+            up.normalize()
+
+            # Build triangulated cone: apex at spotlight, base ring at target
+            n_slices = CFG.BEAM_SLICES
+            fmt = GeomVertexFormat.getV3c4()
+            vdata = GeomVertexData("beam", fmt, Geom.UHStatic)
+            vdata.setNumRows(n_slices + 1)
+            vwriter = GeomVertexWriter(vdata, "vertex")
+            cwriter = GeomVertexWriter(vdata, "color")
+
+            # Vertex 0: cone apex (spotlight position) — brighter
+            vwriter.addData3(sl_pos[0], sl_pos[1], sl_pos[2])
+            cwriter.addData4(1.0, 0.95, 0.7, CFG.BEAM_APEX_ALPHA)
+
+            # Vertices 1..n_slices: base ring at target — dimmer
+            for i in range(n_slices):
+                a = 2 * math.pi * i / n_slices
+                cos_a = math.cos(a)
+                sin_a = math.sin(a)
+                rx = tgt[0] + base_r * (cos_a * right[0] + sin_a * up[0])
+                ry = tgt[1] + base_r * (cos_a * right[1] + sin_a * up[1])
+                rz = tgt[2] + base_r * (cos_a * right[2] + sin_a * up[2])
+                vwriter.addData3(rx, ry, rz)
+                cwriter.addData4(1.0, 0.95, 0.7, CFG.BEAM_BASE_ALPHA)
+
+            tris = GeomTriangles(Geom.UHStatic)
+            for i in range(n_slices):
+                tris.addVertices(0, 1 + i, 1 + (i + 1) % n_slices)
+            tris.closePrimitive()
+
+            geom = Geom(vdata)
+            geom.addPrimitive(tris)
+            gnode = GeomNode("beam_cone")
+            gnode.addGeom(geom)
+
+            self._beam_node = self.render.attachNewNode(gnode)
+            self._beam_node.setTwoSided(True)
+            self._beam_node.setLightOff()
+            self._beam_node.setDepthWrite(False)
+            self._beam_node.setBin("fixed", 6)
+            self._beam_node.setAttrib(
+                ColorBlendAttrib.make(
+                    ColorBlendAttrib.MAdd,
+                    ColorBlendAttrib.OIncomingAlpha,
+                    ColorBlendAttrib.OOne))
+
+            # --- Light splash on target (bright reflection) ---
+            splash_size = max(base_r * 3.0, CFG.BEAM_SPLASH_MIN_SIZE)
+            splash_root = self.render.attachNewNode("beam_splash_root")
+
+            # Inner hot spot
+            cm = CardMaker("splash_core")
+            cm.setFrame(-splash_size * 0.4, splash_size * 0.4,
+                        -splash_size * 0.4, splash_size * 0.4)
+            core = splash_root.attachNewNode(cm.generate())
+            core.setPos(tgt)
+            core.setBillboardPointEye()
+            core.setColor(1.0, 0.97, 0.9, CFG.BEAM_SPLASH_CORE_ALPHA)
+            core.setLightOff()
+            core.setDepthWrite(False)
+            core.setBin("fixed", 8)
+            core.setAttrib(
+                ColorBlendAttrib.make(
+                    ColorBlendAttrib.MAdd,
+                    ColorBlendAttrib.OIncomingAlpha,
+                    ColorBlendAttrib.OOne))
+
+            # Outer glow halo
+            cm2 = CardMaker("splash_glow")
+            cm2.setFrame(-splash_size, splash_size, -splash_size, splash_size)
+            glow = splash_root.attachNewNode(cm2.generate())
+            glow.setPos(tgt)
+            glow.setBillboardPointEye()
+            glow.setColor(1.0, 0.95, 0.7, CFG.BEAM_SPLASH_GLOW_ALPHA)
+            glow.setLightOff()
+            glow.setDepthWrite(False)
+            glow.setBin("fixed", 7)
+            glow.setAttrib(
+                ColorBlendAttrib.make(
+                    ColorBlendAttrib.MAdd,
+                    ColorBlendAttrib.OIncomingAlpha,
+                    ColorBlendAttrib.OOne))
+
+            self._beam_splash = splash_root
+
+            # --- Beam-cloud intersection glows ---
+            if hasattr(self, 'cloud_root') and not self.cloud_root.isHidden():
+                for cloud_card in self.cloud_root.getChildren():
+                    # Cloud position in render space (cloud_root may be rotated)
+                    cpos = cloud_card.getPos(self.render)
+                    cloud_z = cpos[2]
+
+                    # Ray-plane intersection: beam from sl_pos toward tgt
+                    # Find t where sl_pos.z + t*(tgt.z - sl_pos.z) = cloud_z
+                    dz_beam = tgt[2] - sl_pos[2]
+                    if abs(dz_beam) < 0.01:
+                        continue
+                    t_hit = (cloud_z - sl_pos[2]) / dz_beam
+                    if t_hit < 0.05 or t_hit > 1.2:
+                        continue  # behind spotlight or past target
+
+                    # Intersection point on beam ray
+                    ix = sl_pos[0] + t_hit * (tgt[0] - sl_pos[0])
+                    iy = sl_pos[1] + t_hit * (tgt[1] - sl_pos[1])
+
+                    # Check if intersection is within cloud radius
+                    # Cloud size stored in the card's scale (half-size)
+                    cloud_sx = cloud_card.getSx(self.render)
+                    cloud_sy = cloud_card.getSy(self.render)
+                    cloud_r = max(abs(cloud_sx), abs(cloud_sy)) * 0.5
+                    # Default card size is baked into geometry, estimate ~80m
+                    cloud_r = max(cloud_r, 40.0)
+
+                    dx_c = ix - cpos[0]
+                    dy_c = iy - cpos[1]
+                    dist_c = (dx_c * dx_c + dy_c * dy_c) ** 0.5
+                    if dist_c > cloud_r:
+                        continue
+
+                    # Splash brightness fades toward cloud edges
+                    edge_fade = max(0.1, 1.0 - (dist_c / cloud_r))
+                    spot_size = base_r * t_hit * 2.5 + 5.0  # beam width at cloud
+
+                    cm_c = CardMaker("cloud_splash")
+                    cm_c.setFrame(-spot_size, spot_size, -spot_size, spot_size)
+                    csplash = self.render.attachNewNode(cm_c.generate())
+                    csplash.setPos(ix, iy, cloud_z)
+                    csplash.setBillboardPointEye()
+                    csplash.setColor(1.0, 0.97, 0.85, 0.20 * edge_fade)
+                    csplash.setLightOff()
+                    csplash.setDepthWrite(False)
+                    csplash.setBin("fixed", 6)
+                    csplash.setAttrib(
+                        ColorBlendAttrib.make(
+                            ColorBlendAttrib.MAdd,
+                            ColorBlendAttrib.OIncomingAlpha,
+                            ColorBlendAttrib.OOne))
+                    self._beam_cloud_splashes.append(csplash)
+        else:
+            # No target — soldier faces north, spotlight forward
+            self._sl_soldier_np.setH(0)
+            self._searchlight_np.lookAt(self.render, LPoint3(5.0, 100, 0))
 
     def _make_flash_sprite(self, parent_np):
-        """Create a muzzle flash billboard."""
-        cm = CardMaker("flash")
-        cm.setFrame(-0.15, 0.15, -0.15, 0.15)
-        flash = parent_np.attachNewNode(cm.generate())
-        flash.setBillboardPointEye()
-        flash.setColor(1, 0.9, 0.3, 1)
-        flash.setTransparency(TransparencyAttrib.MAlpha)
-        flash.setLightOff()
-        flash.setBin("fixed", 10)
-        return flash
+        """Create a multi-layered muzzle flash with procedural starburst texture."""
+        root = parent_np.attachNewNode("muzzle_flash")
+
+        # Generate starburst texture once (shared across both barrels)
+        if not hasattr(self, '_flash_tex'):
+            self._flash_tex = self._generate_flash_texture()
+
+        # Core flash — bright, small
+        cm = CardMaker("flash_core")
+        cm.setFrame(-CFG.FLASH_CORE_SIZE, CFG.FLASH_CORE_SIZE,
+                   -CFG.FLASH_CORE_SIZE, CFG.FLASH_CORE_SIZE)
+        core = root.attachNewNode(cm.generate())
+        core.setBillboardPointEye()
+        core.setTexture(self._flash_tex)
+        core.setLightOff()
+        core.setBin("fixed", 11)
+        core.setDepthWrite(False)
+        core.setAttrib(
+            ColorBlendAttrib.make(
+                ColorBlendAttrib.MAdd,
+                ColorBlendAttrib.OIncomingAlpha,
+                ColorBlendAttrib.OOne))
+
+        # Outer glow — larger, dimmer, warm orange
+        cm2 = CardMaker("flash_glow")
+        cm2.setFrame(-CFG.FLASH_GLOW_SIZE, CFG.FLASH_GLOW_SIZE,
+                    -CFG.FLASH_GLOW_SIZE, CFG.FLASH_GLOW_SIZE)
+        glow = root.attachNewNode(cm2.generate())
+        glow.setBillboardPointEye()
+        glow.setTexture(self._flash_tex)
+        glow.setColor(*CFG.FLASH_GLOW_COLOR)
+        glow.setLightOff()
+        glow.setBin("fixed", 10)
+        glow.setDepthWrite(False)
+        glow.setAttrib(
+            ColorBlendAttrib.make(
+                ColorBlendAttrib.MAdd,
+                ColorBlendAttrib.OIncomingAlpha,
+                ColorBlendAttrib.OOne))
+
+        # Point light for dynamic illumination on nearby geometry
+        pl = PointLight("muzzle_light")
+        pl.setColor(LVector4(*CFG.FLASH_LIGHT_COLOR))
+        pl.setAttenuation(LVector3(*CFG.FLASH_LIGHT_ATTEN))
+        pl_np = root.attachNewNode(pl)
+        root.setPythonTag("point_light", pl_np)
+
+        return root
+
+    def _generate_flash_texture(self):
+        """Generate a procedural starburst texture for muzzle flash."""
+        from panda3d.core import PNMImage, Texture as Tex
+        size = CFG.FLASH_TEX_SIZE
+        img = PNMImage(size, size, 4)
+        img.alphaFill(0)
+        cx, cy = size // 2, size // 2
+        max_r = size // 2
+
+        for y in range(size):
+            for x in range(size):
+                dx = x - cx
+                dy = y - cy
+                r = (dx * dx + dy * dy) ** 0.5
+                if r >= max_r:
+                    continue
+
+                # Radial falloff (bright center, soft edge)
+                t = r / max_r
+                radial = max(0, 1.0 - t * t)
+
+                # Spiky pattern — 6 rays
+                if r > 0.5:
+                    angle = math.atan2(dy, dx)
+                    spike = (math.cos(angle * 6) * 0.5 + 0.5) ** 2
+                    spike = 0.4 + 0.6 * spike
+                else:
+                    spike = 1.0
+
+                alpha = radial * spike
+                brightness = radial ** 0.5  # bright core
+                img.setXelA(x, y,
+                            min(1.0, brightness * 1.0),
+                            min(1.0, brightness * 0.85),
+                            min(1.0, brightness * 0.3),
+                            alpha)
+
+        tex = Tex("muzzle_flash_tex")
+        tex.load(img)
+        tex.setWrapU(Tex.WMClamp)
+        tex.setWrapV(Tex.WMClamp)
+        return tex
 
     # =========================================================
     # HUD
@@ -680,8 +1053,8 @@ class TurretSimApp(ShowBase):
         """Create a top-left radar display showing target relative to turret."""
         # Radar geometry in aspect2d coordinates
         AR = self.getAspectRatio()
-        self._radar_radius = 0.18          # radius in aspect2d units
-        self._radar_max_range = 3000.0     # meters mapped to radar edge
+        self._radar_radius = CFG.RADAR_RADIUS
+        self._radar_max_range = CFG.RADAR_MAX_RANGE
         # Position: top-left of viewport
         self._radar_cx = -AR + 0.24        # centre x
         self._radar_cy = 0.78              # centre y
@@ -718,7 +1091,7 @@ class TurretSimApp(ShowBase):
         cm = CardMaker("radar_disc")
         cm.setFrame(cx - r - 0.005, cx + r + 0.005,
                      cy - r - 0.005, cy + r + 0.005)
-        cm.setColor(0.05, 0.08, 0.05, 0.70)
+        cm.setColor(*CFG.RADAR_BG_COLOR)
         disc = self._radar_static.attachNewNode(cm.generate())
         disc.setTransparency(TransparencyAttrib.MAlpha)
 
@@ -766,7 +1139,7 @@ class TurretSimApp(ShowBase):
             lx = cx + (r + offset) * math.sin(a)
             ly = cy + (r + offset) * math.cos(a)
             OnscreenText(
-                text=label, pos=(lx, ly), scale=0.022,
+                text=label, pos=(lx, ly), scale=0.030,
                 fg=(0.3, 0.7, 0.3, 0.8), align=TextNode.ACenter,
                 parent=self._radar_static,
             )
@@ -778,13 +1151,13 @@ class TurretSimApp(ShowBase):
             range_txt = f"{self._radar_max_range:.0f}m"
         OnscreenText(
             text=range_txt, pos=(cx + r - 0.02, cy - r + 0.01),
-            scale=0.018, fg=(0.3, 0.6, 0.3, 0.5), align=TextNode.ARight,
+            scale=0.028, fg=(0.3, 0.6, 0.3, 0.5), align=TextNode.ARight,
             parent=self._radar_static,
         )
 
         # --- "RADAR" title ---
         OnscreenText(
-            text="RADAR", pos=(cx, cy + r + 0.035), scale=0.022,
+            text="RADAR", pos=(cx, cy + r + 0.04), scale=0.032,
             fg=(0.3, 0.7, 0.3, 0.9), align=TextNode.ACenter,
             parent=self._radar_static,
         )
@@ -868,7 +1241,7 @@ class TurretSimApp(ShowBase):
             # Range text below radar
             OnscreenText(
                 text=f"{ground_range:.0f}m",
-                pos=(cx, cy - r - 0.025), scale=0.020,
+                pos=(cx, cy - r - 0.03), scale=0.032,
                 fg=(1.0, 0.2, 0.2, 0.9), align=TextNode.ACenter,
                 parent=self._radar_dyn_np,
             )
@@ -886,7 +1259,7 @@ class TurretSimApp(ShowBase):
         # the bug (scope inherits orbit camera movement).
         # Instead we deactivate that default DR and add our own.
         self.scope_buffer = self.win.makeTextureBuffer(
-            "scope", 256, 256)
+            "scope", CFG.SCOPE_TEX_SIZE, CFG.SCOPE_TEX_SIZE)
         self.scope_buffer.setSort(-100)
         self.scope_buffer.setClearColorActive(True)
         self.scope_buffer.setClearColor(LColor(0.78, 0.84, 0.92, 1))
@@ -901,8 +1274,8 @@ class TurretSimApp(ShowBase):
         # physically follows both yaw and elevation — just like the real scope.
         # This replaces manual setPos/setHpr in _update_scope_camera.
         scope_lens = PerspectiveLens()
-        scope_lens.setFov(5)  # Narrow FOV = zoom
-        scope_lens.setNearFar(0.1, 10000)
+        scope_lens.setFov(CFG.SCOPE_FOV)
+        scope_lens.setNearFar(CFG.SCOPE_NEAR, CFG.SCOPE_FAR)
 
         scope_cam_node = Camera("scope_cam")
         scope_cam_node.setLens(scope_lens)
@@ -1015,8 +1388,8 @@ class TurretSimApp(ShowBase):
         # Separate lens for FPS mode — wider than PIP scope (5°) but
         # still zoomed compared to naked eye.
         self._fps_scope_lens = PerspectiveLens()
-        self._fps_scope_lens.setFov(15)
-        self._fps_scope_lens.setNearFar(0.1, 10000)
+        self._fps_scope_lens.setFov(CFG.FP_FOV)
+        self._fps_scope_lens.setNearFar(CFG.FP_NEAR, CFG.FP_FAR)
 
         # Keep a reference to the original PIP lens
         self._pip_scope_lens = self.scope_cam.node().getLens()
@@ -1441,7 +1814,7 @@ class TurretSimApp(ShowBase):
                 self.hud_texts[key].hide()
 
         # ] key
-        self.accept("]", self._toggle_debug_panel)
+        self.accept(CFG.KEYS["debug_panel"], self._toggle_debug_panel)
 
     def _set_viewport_for_panel(self, panel_open):
         """Resize the main camera display region based on panel visibility."""
@@ -1684,13 +2057,13 @@ class TurretSimApp(ShowBase):
         # Movement and firing are polled directly via isButtonDown in
         # _handle_keyboard — no event bindings needed for arrows/WASD/space.
 
-        self.accept("r", self._on_reload)
-        self.accept("enter", self._on_enter)
-        self.accept("t", self._on_training)
-        self.accept("c", self._toggle_camera_mode)
-        self.accept("v", self._toggle_scope_thermal)
-        self.accept("n", self._toggle_day_night)
-        self.accept("escape", sys.exit)
+        self.accept(CFG.KEYS["reload"], self._on_reload)
+        self.accept(CFG.KEYS["start"], self._on_enter)
+        self.accept(CFG.KEYS["training"], self._on_training)
+        self.accept(CFG.KEYS["camera_toggle"], self._toggle_camera_mode)
+        self.accept(CFG.KEYS["thermal"], self._toggle_scope_thermal)
+        self.accept(CFG.KEYS["night_mode"], self._toggle_day_night)
+        self.accept(CFG.KEYS["quit"], sys.exit)
 
 
         # Mouse - orbit camera (LMB or MMB)
@@ -1743,7 +2116,8 @@ class TurretSimApp(ShowBase):
     def _on_scroll(self, direction):
         if self.cam_mode == "first_person":
             return  # Scroll not used in FP mode
-        self.cam_distance = max(3, min(50, self.cam_distance + direction * 0.8))
+        self.cam_distance = max(CFG.CAM_ZOOM_MIN, min(CFG.CAM_ZOOM_MAX,
+                                self.cam_distance + direction * CFG.CAM_ZOOM_STEP))
         self._update_camera()
 
     def _handle_mouse(self):
@@ -1762,8 +2136,9 @@ class TurretSimApp(ShowBase):
         self._last_mouse_x = mx
         self._last_mouse_y = my
 
-        self.cam_heading -= dx * 100
-        self.cam_pitch = max(-85, min(85, self.cam_pitch - dy * 60))
+        self.cam_heading -= dx * CFG.CAM_DRAG_H_SENS
+        self.cam_pitch = max(CFG.CAM_PITCH_MIN, min(CFG.CAM_PITCH_MAX,
+                             self.cam_pitch - dy * CFG.CAM_DRAG_P_SENS))
         self._update_camera()
 
     def _handle_mouse_fp(self):
@@ -1774,8 +2149,7 @@ class TurretSimApp(ShowBase):
         mx = self.mouseWatcherNode.getMouseX()
         my = self.mouseWatcherNode.getMouseY()
 
-        # Sensitivity: degrees per unit of mouse offset (low = precise)
-        sensitivity = 0.4
+        sensitivity = CFG.FP_MOUSE_SENS
 
         turret = self.game_mgr.turret
         target_az = turret.target_azimuth + mx * np.radians(sensitivity)
@@ -1799,7 +2173,7 @@ class TurretSimApp(ShowBase):
         so that simultaneous X+Y axis input is always detected reliably.
         """
         turret = self.game_mgr.turret
-        manual_speed_rad = np.radians(15.0)  # 15 deg/s — precise aiming
+        manual_speed_rad = np.radians(CFG.MANUAL_AIM_SPEED)
 
         # Poll keyboard state directly — guaranteed to read all held keys
         is_down = self.mouseWatcherNode.isButtonDown
@@ -1818,9 +2192,9 @@ class TurretSimApp(ShowBase):
         if move_right:
             target_az += manual_speed_rad * dt
         if move_up:
-            target_el += manual_speed_rad * dt * 0.7
+            target_el += manual_speed_rad * dt * CFG.VERTICAL_SPEED_MULT
         if move_down:
-            target_el -= manual_speed_rad * dt * 0.7
+            target_el -= manual_speed_rad * dt * CFG.VERTICAL_SPEED_MULT
 
         turret.set_target(target_az, target_el)
 
@@ -1883,7 +2257,7 @@ class TurretSimApp(ShowBase):
                 self.target_np.hide()
 
     def _update_tracers(self):
-        """Update bullet tracer visuals using engine tracer trails."""
+        """Update bullet tracer visuals — bright head, fading tail."""
         # Remove old tracer nodes
         for node in self.tracer_nodes:
             node.removeNode()
@@ -1895,19 +2269,20 @@ class TurretSimApp(ShowBase):
             if len(trail) < 2:
                 continue
 
-            segs = LineSegs("tracer")
-            segs.setThickness(2.0)
+            # --- Glowing tracer core (thick, bright) ---
+            segs = LineSegs("tracer_core")
+            segs.setThickness(CFG.TRACER_CORE_THICKNESS)
 
-            # Use last 30 points for visible trail
-            visible = trail[-30:]
+            visible = trail[-CFG.TRACER_TRAIL_LENGTH:]
+            n = len(visible)
             for i, pos in enumerate(visible):
-                t = i / len(visible)
+                t = i / n  # 0=tail, 1=head
+                # Hot white head fading to red-orange tail
                 r = 1.0
-                g = 0.9 * (1 - t * 0.7)
-                b = 0.2 * (1 - t)
-                a = 0.3 + 0.7 * t
+                g = 0.4 + 0.6 * t       # head: white-yellow, tail: orange
+                b = 0.1 * t              # head: slight yellow, tail: red
+                a = 0.1 + 0.9 * (t ** 0.5)  # quick ramp to bright head
                 segs.setColor(r, g, b, a)
-                # ENU maps directly to Panda3D (X, Y, Z)
                 if i == 0:
                     segs.moveTo(pos[0], pos[1], pos[2])
                 else:
@@ -1916,26 +2291,60 @@ class TurretSimApp(ShowBase):
             node = self.render.attachNewNode(segs.create())
             node.setLightOff()
             node.setBin("fixed", 5)
-            node.setTransparency(TransparencyAttrib.MAlpha)
+            node.setDepthWrite(False)
+            node.setAttrib(
+                ColorBlendAttrib.make(
+                    ColorBlendAttrib.MAdd,
+                    ColorBlendAttrib.OIncomingAlpha,
+                    ColorBlendAttrib.OOne))
             self.tracer_nodes.append(node)
 
+            # --- Outer glow (wider, dimmer) ---
+            segs2 = LineSegs("tracer_glow")
+            segs2.setThickness(CFG.TRACER_GLOW_THICKNESS)
+            for i, pos in enumerate(visible):
+                t = i / n
+                segs2.setColor(1.0, 0.6, 0.1, 0.08 * t)
+                if i == 0:
+                    segs2.moveTo(pos[0], pos[1], pos[2])
+                else:
+                    segs2.drawTo(pos[0], pos[1], pos[2])
+
+            glow = self.render.attachNewNode(segs2.create())
+            glow.setLightOff()
+            glow.setBin("fixed", 4)
+            glow.setDepthWrite(False)
+            glow.setAttrib(
+                ColorBlendAttrib.make(
+                    ColorBlendAttrib.MAdd,
+                    ColorBlendAttrib.OIncomingAlpha,
+                    ColorBlendAttrib.OOne))
+            self.tracer_nodes.append(glow)
+
     def _update_muzzle_flash(self, dt):
-        """Show muzzle flash when firing."""
+        """Show muzzle flash when firing — starburst + point light."""
         if self.muzzle_flash_timer > 0:
             self.muzzle_flash_timer -= dt
-            # Random flash size
-            s = random.uniform(0.8, 1.5)
-            if self.next_barrel == 0:
-                self.flash_l.show()
-                self.flash_l.setScale(s)
-                self.flash_r.hide()
-            else:
-                self.flash_r.show()
-                self.flash_r.setScale(s)
-                self.flash_l.hide()
+            # Random scale and roll for variation each frame
+            # Both barrels flash simultaneously (twin mount)
+            for flash in (self.flash_l, self.flash_r):
+                s = random.uniform(CFG.FLASH_SCALE_MIN, CFG.FLASH_SCALE_MAX)
+                roll = random.uniform(0, 360)
+                flash.show()
+                flash.setScale(s)
+                flash.setR(roll)
+                # Enable point light
+                pl_np = flash.getPythonTag("point_light")
+                if pl_np:
+                    self.render.setLight(pl_np)
         else:
             self.flash_l.hide()
             self.flash_r.hide()
+            # Disable both point lights
+            for flash in (self.flash_l, self.flash_r):
+                pl_np = flash.getPythonTag("point_light")
+                if pl_np:
+                    self.render.clearLight(pl_np)
 
     # =========================================================
     # GAME EVENTS
@@ -1948,7 +2357,7 @@ class TurretSimApp(ShowBase):
         self.ws_server.push_event(event)
 
         if etype == "shot_fired":
-            self.muzzle_flash_timer = 0.03
+            self.muzzle_flash_timer = CFG.FLASH_DURATION
             self.next_barrel = 1 - self.next_barrel
 
         elif etype in ("target_hit", "training_hit"):
@@ -1960,30 +2369,154 @@ class TurretSimApp(ShowBase):
                 self.target_np = None
 
     def _create_explosion(self, pos):
-        """Simple explosion effect (expanding sphere)."""
-        explosion = make_sphere("explosion", 2.0, 8, 6, (1, 0.6, 0.1, 0.8))
-        explosion.reparentTo(self.render)
-        explosion.setPos(pos)
-        explosion.setTransparency(TransparencyAttrib.MAlpha)
-        explosion.setLightOff()
-        explosion.setBin("fixed", 8)
+        """Multi-layered explosion: fireball, shockwave, debris, flash, smoke."""
+        root = self.render.attachNewNode("explosion_root")
+        root.setPos(pos)
 
-        # Animate with task
-        start_scale = 0.1
-        explosion.setScale(start_scale)
+        # --- 1. Fireball core (bright white-yellow → orange → dark red) ---
+        fireball = make_sphere("fireball", 1.0, 12, 8, (1, 1, 0.9, 1))
+        fireball.reparentTo(root)
+        fireball.setLightOff()
+        fireball.setBin("fixed", 10)
+        fireball.setDepthWrite(False)
+        fireball.setAttrib(
+            ColorBlendAttrib.make(
+                ColorBlendAttrib.MAdd,
+                ColorBlendAttrib.OIncomingAlpha,
+                ColorBlendAttrib.OOne))
 
-        def expand_task(task):
+        # --- 2. Outer fire shell (expanding, orange) ---
+        outer_fire = make_sphere("outer_fire", 1.0, 10, 6, (1, 0.5, 0.1, 0.6))
+        outer_fire.reparentTo(root)
+        outer_fire.setLightOff()
+        outer_fire.setBin("fixed", 9)
+        outer_fire.setDepthWrite(False)
+        outer_fire.setAttrib(
+            ColorBlendAttrib.make(
+                ColorBlendAttrib.MAdd,
+                ColorBlendAttrib.OIncomingAlpha,
+                ColorBlendAttrib.OOne))
+
+        # --- 3. Shockwave ring (fast expanding flat ring) ---
+        shockwave = make_cylinder("shockwave", 1.0, 0.3, 16, (1, 0.9, 0.7, 0.4))
+        shockwave.reparentTo(root)
+        shockwave.setLightOff()
+        shockwave.setBin("fixed", 8)
+        shockwave.setDepthWrite(False)
+        shockwave.setAttrib(
+            ColorBlendAttrib.make(
+                ColorBlendAttrib.MAdd,
+                ColorBlendAttrib.OIncomingAlpha,
+                ColorBlendAttrib.OOne))
+
+        # --- 4. Debris particles (small spheres flung outward) ---
+        debris_nodes = []
+        debris_vels = []
+        for i in range(CFG.EXPLOSION_DEBRIS_COUNT):
+            d = make_sphere(f"debris_{i}", 0.15, 4, 3, (1, 0.7, 0.2, 1))
+            d.reparentTo(self.render)
+            d.setPos(pos)
+            d.setLightOff()
+            d.setBin("fixed", 11)
+            d.setDepthWrite(False)
+            d.setAttrib(
+                ColorBlendAttrib.make(
+                    ColorBlendAttrib.MAdd,
+                    ColorBlendAttrib.OIncomingAlpha,
+                    ColorBlendAttrib.OOne))
+            # Random velocity
+            a = random.uniform(0, 2 * math.pi)
+            el = random.uniform(-0.3, 0.8)
+            spd = random.uniform(*CFG.EXPLOSION_DEBRIS_SPEED)
+            vx = spd * math.cos(a) * math.cos(el)
+            vy = spd * math.sin(a) * math.cos(el)
+            vz = spd * math.sin(el)
+            debris_nodes.append(d)
+            debris_vels.append((vx, vy, vz))
+
+        # --- 5. Flash point light (brief bright illumination) ---
+        pl = PointLight("explosion_light")
+        pl.setColor(LVector4(*CFG.EXPLOSION_LIGHT_COLOR))
+        pl.setAttenuation(LVector3(*CFG.EXPLOSION_LIGHT_ATTEN))
+        pl_np = root.attachNewNode(pl)
+        self.render.setLight(pl_np)
+
+        # --- 6. Smoke cloud (dark, slow, lingers) ---
+        smoke = make_sphere("smoke", 1.0, 8, 6, (0.15, 0.12, 0.1, 0.4))
+        smoke.reparentTo(root)
+        smoke.setTransparency(TransparencyAttrib.MAlpha)
+        smoke.setLightOff()
+        smoke.setBin("fixed", 7)
+        smoke.setDepthWrite(False)
+        smoke.setScale(0.5)
+
+        duration = CFG.EXPLOSION_DURATION
+
+        def explosion_task(task):
             t = task.time
-            if t > 1.0:
-                explosion.removeNode()
+            if t > duration:
+                root.removeNode()
+                for d in debris_nodes:
+                    if not d.isEmpty():
+                        d.removeNode()
+                self.render.clearLight(pl_np)
                 return Task.done
-            scale = start_scale + t * 5
-            alpha = max(0, 1 - t)
-            explosion.setScale(scale)
-            explosion.setColor(1, 0.6 - t*0.3, 0.1, alpha)
+
+            p = t / duration  # 0..1 normalized progress
+
+            # Fireball: fast expand then shrink, white→orange→red
+            fb_scale = 0.5 + 6.0 * p * math.exp(-3.0 * p)
+            fb_alpha = max(0, 1.0 - p * 1.5)
+            fireball.setScale(fb_scale)
+            fireball.setColor(1, max(0.3, 1.0 - p), max(0, 0.9 - p * 2), fb_alpha)
+
+            # Outer fire: expands slower, fades
+            of_scale = 1.0 + 10.0 * p
+            of_alpha = max(0, 0.6 - p * 0.8)
+            outer_fire.setScale(of_scale)
+            outer_fire.setColor(1, 0.4 - p * 0.3, 0.05, of_alpha)
+
+            # Shockwave: fast radial expansion, thins and fades
+            sw_r = 2.0 + 30.0 * p
+            sw_h = max(0.05, 0.3 * (1 - p))
+            sw_alpha = max(0, 0.4 * (1 - p * 1.5))
+            shockwave.setScale(sw_r, sw_r, sw_h)
+            shockwave.setColor(1, 0.9, 0.7, sw_alpha)
+
+            # Debris: fly outward with gravity, fade out
+            dt_real = globalClock.getDt()
+            for i, d in enumerate(debris_nodes):
+                if d.isEmpty():
+                    continue
+                vx, vy, vz = debris_vels[i]
+                # Apply gravity
+                vz -= 9.8 * dt_real
+                debris_vels[i] = (vx, vy, vz)
+                cp = d.getPos()
+                d.setPos(cp[0] + vx * dt_real, cp[1] + vy * dt_real, cp[2] + vz * dt_real)
+                d_alpha = max(0, 1.0 - p * 1.2)
+                d.setColor(1, 0.5 * (1 - p), 0.1 * (1 - p), d_alpha)
+                d.setScale(0.15 * (1 - p * 0.5))
+                if p > 0.8:
+                    d.removeNode()
+
+            # Flash light: intense then quick falloff
+            light_intensity = max(0, 15.0 * math.exp(-8.0 * t))
+            pl.setColor(LVector4(light_intensity, light_intensity * 0.65,
+                                 light_intensity * 0.25, 1))
+            if t > 0.5:
+                self.render.clearLight(pl_np)
+
+            # Smoke: slow expand, lingers, rises slightly
+            sm_scale = 1.0 + 4.0 * p
+            sm_alpha = min(0.5, 0.1 + 0.5 * p) * max(0, 1.0 - (p - 0.5) * 2)
+            smoke.setScale(sm_scale)
+            smoke.setPos(0, 0, 1.5 * p)  # drift upward
+            smoke.setColor(0.15, 0.12, 0.1, max(0, sm_alpha))
+
             return Task.cont
 
-        self.taskMgr.add(expand_task, "explosion")
+        self.taskMgr.add(explosion_task, f"explosion_{id(root)}")
 
     # =========================================================
     # MAIN UPDATE LOOP
@@ -1992,7 +2525,7 @@ class TurretSimApp(ShowBase):
     def _update(self, task):
         """Main game loop - called every frame."""
         dt = globalClock.getDt()
-        dt = min(dt, 0.05)  # Cap delta time
+        dt = min(dt, CFG.MAX_FRAME_DT)
 
         # Input
         self._handle_mouse()
@@ -2021,6 +2554,7 @@ class TurretSimApp(ShowBase):
         self._update_tracers()
         self._update_muzzle_flash(dt)
         self._update_scope_camera()
+        self._update_searchlight()
         self._update_scope_debug()
         self._update_hud()
         self._update_radar(dt)
@@ -2028,7 +2562,7 @@ class TurretSimApp(ShowBase):
 
         # Slow cloud drift (~0.3 deg/s rotation)
         if hasattr(self, 'cloud_root'):
-            self.cloud_root.setH(self.cloud_root.getH() + dt * 0.3)
+            self.cloud_root.setH(self.cloud_root.getH() + dt * CFG.CLOUD_DRIFT_SPEED)
 
         return Task.cont
 
